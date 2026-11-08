@@ -73,6 +73,45 @@ All data is fake. Windows, files, networks, devices and tray apps are stand-ins.
 | 4. Launchpad: right | Control center, tray icon hosting | All tray apps reachable without the Windows taskbar |
 | 5. Launchpad: left, settings, polish | Widgets, Settings window, motion polish | Settings in this prototype all work natively |
 
+## Phase 0 status (native spike, 2026-11-07)
+
+Code: [`native/laminar/`](native/laminar/), a Cargo workspace member. Build with `cargo build --release`, then run `target\release\laminar.exe`. Right-click the dock and choose **Quit Laminar** to exit.
+
+| Flag | Purpose |
+| --- | --- |
+| `--measure` | Run for ~17 s, print startup/memory/CPU as JSON (also saved to `laminar-metrics.json`), then quit |
+| `--demo-hover` | Hold the dock magnified at the 5th icon (for screenshots) |
+| `--exit-after N` | Quit after N seconds |
+| `LAMINAR_GPU=hardware` (env var) | Paint bitmaps with the GPU driver instead of WARP (for comparison) |
+
+### Measured
+
+| Metric | Result | Target |
+| --- | --- | --- |
+| Idle CPU (10 s) | 0.000% | ≈ 0% ✅ |
+| CPU during simulated hover (63 moves/s) | 1.25% of one core | low ✅ |
+| Task Manager memory (private working set) | 23.4 MB | < 40 MB ✅ |
+| Private (committed) memory | 34.8 MB | < 40 MB ✅ |
+| Startup to first frame | 662 ms | < 200 ms ❌ (≈ 610 ms is asking the shell for icons) |
+| Binary size | 260 KB | — |
+
+Memory per stage (private, hardware device): runtime 2.6 MB → shell icons +12.6 → compositor +0.8 → **GPU driver device +46.7** → surfaces +8.3. Painting with WARP (the software rasterizer) removes the driver cost. The GPU compositor still does all animation, so it's the default now.
+
+### Verified vs not yet
+
+| Item | Status |
+| --- | --- |
+| Win32 + Windows Composition from Rust | ✅ works |
+| Live blur of the real desktop (`HostBackdropBrush`) | ✅ works. It needs `DWMWA_USE_HOSTBACKDROPBRUSH`; without it the glass is black |
+| Real app icons from the shell (classic and Store apps) | ✅ 14 icons render sharply |
+| Laminar logo drawn with Direct2D | ✅ |
+| Magnification (expression animations), glass hover label, rim | ✅ Seen with the screen on. Note: while the monitor is asleep, Windows pauses composition animations (`GlobalPlaybackRate` reads 0), so test with the screen awake. |
+| Launch bounce, click to launch, hover region, right-click quit | ⚠️ Dave trying by hand |
+
+Fixed during verification: the rim nine-grid needs its source brush set to `Stretch = Fill`; otherwise it draws once, unstretched, in the middle of the dock.
+
+Next fixes once animation is confirmed: an on-disk icon cache so startup skips the shell (target < 200 ms), a soft shelf shadow, custom blur radius, and wallpaper refraction.
+
 ## Later / to-do
 
 - Brightness control in the control center. Deferred because the test machine is a desktop. External monitors will need DDC/CI.
