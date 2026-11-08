@@ -1,0 +1,198 @@
+/* Laminar Dock prototype — design tokens, themes and the shared glass material. */
+
+:root {
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+
+  /* Live tokens (overwritten from settings by main.js) */
+  --accent: #0A84FF;
+  --icon: 54px;
+  --mag: 88px;
+  --gap: 8px;
+  --pad: 8px;
+  --dock-radius: 24px;
+  --glass-tint: .24;
+  --glass-blur: 12px;
+  --glass-sat: 180%;
+  --edge: .55;
+  --shadow: .35;
+  --lp-icon: 62px;
+  --lp-blur: 36px;
+  --dur: 520ms;
+  --spring: cubic-bezier(.2, .9, .25, 1);
+  --ease: cubic-bezier(.25, .8, .25, 1);
+}
+
+html.theme-light {
+  --glass-rgb: 250, 250, 253;
+  --text: #1d1d1f;
+  --text-2: rgba(29, 29, 31, .62);
+  --text-3: rgba(29, 29, 31, .42);
+  --hair: rgba(0, 0, 0, .09);
+  --fill: rgba(0, 0, 0, .05);
+  --fill-2: rgba(0, 0, 0, .09);
+  --fill-3: rgba(0, 0, 0, .14);
+  --win-bg: #f7f7f9;
+  --win-bar: #ededf1;
+  --card: rgba(255, 255, 255, .55);
+  --shadow-rgb: 30, 30, 60;
+  --ind: #1d1d1f;
+  color-scheme: light;
+}
+
+html.theme-dark {
+  --glass-rgb: 30, 30, 38;
+  --text: #f5f5f7;
+  --text-2: rgba(245, 245, 247, .66);
+  --text-3: rgba(245, 245, 247, .42);
+  --hair: rgba(255, 255, 255, .1);
+  --fill: rgba(255, 255, 255, .07);
+  --fill-2: rgba(255, 255, 255, .12);
+  --fill-3: rgba(255, 255, 255, .18);
+  --win-bg: #1e1e23;
+  --win-bar: #26262d;
+  --card: rgba(255, 255, 255, .07);
+  --shadow-rgb: 0, 0, 0;
+  --ind: #f5f5f7;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+  background: #0b0f2a;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: default; }
+input, select, textarea { font: inherit; color: inherit; }
+kbd {
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--fill-2);
+  border: .5px solid var(--hair);
+}
+.muted { color: var(--text-2); }
+.ui-ico { display: block; flex: none; }
+
+/* ---------- Glass material ----------
+   Tint + backdrop blur + saturation, a specular rim (::before), a soft top
+   highlight and a contact shadow. Every surface in Laminar shares this. */
+.glass {
+  position: relative;
+  background: rgba(var(--glass-rgb), var(--glass-tint));
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 1.8)) saturate(var(--glass-sat));
+  backdrop-filter: blur(calc(var(--glass-blur) * 1.8)) saturate(var(--glass-sat));
+  box-shadow:
+    0 0 0 .5px rgba(0, 0, 0, calc(var(--shadow) * .45)),
+    0 16px 44px rgba(var(--shadow-rgb), calc(var(--shadow) * .9)),
+    0 2px 8px rgba(var(--shadow-rgb), calc(var(--shadow) * .4)),
+    inset 0 1px 0 rgba(255, 255, 255, calc(var(--edge) * .45));
+}
+.glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(155deg,
+      rgba(255, 255, 255, calc(var(--edge) * .95)) 0%,
+      rgba(255, 255, 255, 0) 32%,
+      rgba(255, 255, 255, 0) 68%,
+      rgba(255, 255, 255, calc(var(--edge) * .55)) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  z-index: 1;
+}
+/* Stronger tint for small text-heavy surfaces (menus, labels, popovers). */
+.glass.strong { background: rgba(var(--glass-rgb), min(.9, calc(var(--glass-tint) + .42))); }
+
+/* Generic controls shared by Launchpad and Settings */
+.switch {
+  position: relative;
+  width: 38px; height: 22px;
+  border-radius: 11px;
+  background: var(--fill-3);
+  transition: background .25s var(--ease);
+  flex: none;
+}
+.switch::after {
+  content: "";
+  position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3), 0 0 0 .5px rgba(0, 0, 0, .06);
+  transition: transform var(--dur) var(--spring);
+}
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(16px); }
+
+input[type="range"].slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 22px; background: transparent; margin: 0;
+  --p: 50%;
+}
+input[type="range"].slider::-webkit-slider-runnable-track {
+  height: 6px; border-radius: 3px;
+  background: linear-gradient(to right, var(--accent) var(--p), var(--fill-3) var(--p));
+}
+input[type="range"].slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px; height: 20px; margin-top: -7px; border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .35), 0 0 0 .5px rgba(0, 0, 0, .1);
+  transition: transform .15s;
+}
+input[type="range"].slider:active::-webkit-slider-thumb { transform: scale(1.12); }
+
+/* Big "Control Center" style slider */
+.big-slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 28px; margin: 0; border-radius: 14px; overflow: hidden;
+  background: linear-gradient(to right, rgba(255, 255, 255, .95) var(--p), var(--fill-2) var(--p));
+  --p: 50%;
+}
+html.theme-light .big-slider { background: linear-gradient(to right, #fff var(--p), var(--fill-2) var(--p)); box-shadow: inset 0 0 0 .5px var(--hair); }
+.big-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 28px; height: 28px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 .5px rgba(0, 0, 0, .15), 0 2px 6px rgba(0, 0, 0, .25);
+}
+
+.seg {
+  display: inline-flex; padding: 2px; border-radius: 8px; background: var(--fill-2); gap: 2px;
+}
+.seg button {
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; color: var(--text-2);
+  transition: background .2s, color .2s, box-shadow .2s;
+}
+.seg button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, .95); color: #1d1d1f;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18), 0 0 0 .5px rgba(0, 0, 0, .05);
+}
+html.theme-dark .seg button[aria-pressed="true"] { background: rgba(255, 255, 255, .22); color: #fff; }
+
+.btn {
+  height: 28px; padding: 0 14px; border-radius: 8px;
+  background: var(--fill-2); font-size: 12.5px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: background .15s, transform .15s;
+}
+.btn:hover { background: var(--fill-3); }
+.btn:active { transform: scale(.97); }
+.btn.primary { background: var(--accent); color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}

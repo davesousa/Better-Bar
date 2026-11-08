@@ -1,0 +1,19 @@
+# Rust build output (native app, coming in Phase 0)
+/target/
+**/target/
+
+# Personal Claude Code settings (shared settings like launch.json stay tracked)
+.claude/settings.local.json
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs and local env
+*.log
+.env
+.env.*

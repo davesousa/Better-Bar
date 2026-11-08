@@ -1,0 +1,159 @@
+/* Laminar Dock prototype — wallpaper, simulated app windows, toasts. */
+
+#wallpaper { position: fixed; inset: 0; z-index: 0; overflow: hidden; }
+#wallpaper svg { width: 100%; height: 100%; display: block; }
+#wallpaper .wp { position: absolute; inset: 0; transition: opacity .8s var(--ease); }
+
+#desktop { position: fixed; inset: 0; z-index: 10; }
+
+/* ---------- Windows (styled like Windows 11 apps: they are the user's real apps) ---------- */
+.win {
+  position: absolute;
+  display: flex; flex-direction: column;
+  background: var(--win-bg);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 .5px rgba(0, 0, 0, .35),
+    0 22px 60px rgba(0, 0, 0, .38),
+    0 4px 14px rgba(0, 0, 0, .18);
+  transition: box-shadow .25s, opacity .25s;
+  color: var(--text);
+}
+.win:not(.focused) { box-shadow: 0 0 0 .5px rgba(0, 0, 0, .3), 0 12px 34px rgba(0, 0, 0, .24); }
+.win.max { border-radius: 0; }
+.win.geo-anim { transition: left .42s var(--spring), top .42s var(--spring), width .42s var(--spring), height .42s var(--spring), border-radius .3s; }
+.win.minimized { visibility: hidden; pointer-events: none; }
+
+.win-bar {
+  height: 36px; flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding-left: 12px;
+  background: var(--win-bar);
+  border-bottom: .5px solid var(--hair);
+}
+.win-bar .win-ico { width: 16px; height: 16px; }
+.win-bar .win-ico svg { width: 100%; height: 100%; display: block; }
+.win-title { flex: 1; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.win.focused .win-title { color: var(--text); }
+.win-caps { display: flex; height: 100%; }
+.cap { width: 46px; height: 100%; display: grid; place-items: center; color: var(--text-2); transition: background .12s, color .12s; }
+.cap:hover { background: var(--fill-2); color: var(--text); }
+.cap.close:hover { background: #C42B1C; color: #fff; }
+.win-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+/* Window peek from the hover previews (Windows "Aero Peek", Laminar style) */
+#desktop .win { transition: opacity .3s var(--ease), box-shadow .25s; }
+#desktop.peeking .win:not(.peek-target) { opacity: .08; }
+#desktop.peeking .win.peek-target { visibility: visible; opacity: 1; box-shadow: 0 0 0 2px var(--accent), 0 30px 80px rgba(0, 0, 0, .5); }
+
+/* ---------- Window content mock-ups ---------- */
+.files { display: flex; height: 100%; }
+.files-side { width: 168px; padding: 10px 8px; border-right: .5px solid var(--hair); background: var(--fill); }
+.files-side div { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 12.5px; color: var(--text-2); }
+.files-side div.on { background: var(--fill-2); color: var(--text); }
+.files-main { flex: 1; padding: 14px 18px; overflow: hidden; }
+.files-path { font-size: 12px; color: var(--text-2); margin-bottom: 14px; display: flex; gap: 6px; align-items: center; }
+.files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 14px 10px; }
+.files-grid figure { margin: 0; text-align: center; font-size: 11.5px; color: var(--text-2); }
+.files-grid .fi { width: 56px; height: 46px; margin: 0 auto 6px; border-radius: 6px; }
+.fi.folder { background: linear-gradient(#7CC4FF, #3A8BF0); clip-path: polygon(0 12%, 40% 12%, 48% 0, 100% 0, 100% 100%, 0 100%); }
+.fi.doc { width: 40px; background: linear-gradient(#fff, #e8ecf3); box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
+.fi.img { background: linear-gradient(135deg, #ff9a8b, #7a5cff); }
+
+.browser { display: flex; flex-direction: column; height: 100%; }
+.browser-tabs { display: flex; gap: 4px; padding: 6px 8px 0; background: var(--win-bar); }
+.browser-tabs span { padding: 6px 14px; border-radius: 8px 8px 0 0; font-size: 11.5px; color: var(--text-2); }
+.browser-tabs span.on { background: var(--win-bg); color: var(--text); }
+.browser-url { margin: 8px 10px; height: 30px; border-radius: 15px; background: var(--fill-2); display: flex; align-items: center; gap: 8px; padding: 0 14px; font-size: 12px; color: var(--text-2); }
+.browser-page { flex: 1; margin: 0 10px 10px; border-radius: 10px; overflow: hidden; position: relative; }
+.browser-hero { height: 58%; display: grid; place-content: center; text-align: center; color: #fff; padding: 20px; }
+.browser-hero h1 { font-family: var(--font-display); font-size: 34px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.5px; }
+.browser-hero p { margin: 0; opacity: .85; font-size: 14px; }
+.browser-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px; }
+.browser-cards div { height: 74px; border-radius: 10px; background: var(--fill); }
+
+.music { display: flex; height: 100%; }
+.music-art { width: 46%; display: grid; place-items: center; padding: 22px; }
+.music-art .art { width: 100%; aspect-ratio: 1; border-radius: 12px; box-shadow: 0 18px 40px rgba(0,0,0,.35); position: relative; overflow: hidden; }
+.art-lines { position: absolute; inset: 0; }
+.music-info { flex: 1; padding: 26px 22px 18px 4px; display: flex; flex-direction: column; }
+.music-info h2 { font-family: var(--font-display); font-size: 22px; margin: 0; font-weight: 600; }
+.music-info .artist { color: var(--text-2); margin: 4px 0 18px; font-size: 14px; }
+.music-progress { height: 4px; border-radius: 2px; background: var(--fill-2); overflow: hidden; }
+.music-progress i { display: block; height: 100%; background: var(--text-2); }
+.music-times { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-3); margin-top: 6px; font-variant-numeric: tabular-nums; }
+.music-ctrls { display: flex; gap: 22px; align-items: center; justify-content: center; margin: 14px 0 18px; }
+.music-ctrls button { padding: 6px; border-radius: 50%; }
+.music-ctrls button:hover { background: var(--fill); }
+.music-list { flex: 1; overflow: hidden; border-top: .5px solid var(--hair); padding-top: 8px; }
+.music-list div { display: flex; justify-content: space-between; padding: 7px 4px; font-size: 12.5px; color: var(--text-2); border-radius: 6px; }
+.music-list div.on { color: var(--accent); }
+
+.notes { display: flex; height: 100%; }
+.notes-side { width: 190px; border-right: .5px solid var(--hair); padding: 10px; background: var(--fill); }
+.notes-side .n { padding: 9px 10px; border-radius: 8px; margin-bottom: 4px; }
+.notes-side .n.on { background: #FFD54A; color: #1d1d1f; }
+.notes-side .n b { display: block; font-size: 12.5px; }
+.notes-side .n span { font-size: 11px; opacity: .65; }
+.notes-doc { flex: 1; padding: 20px 26px; overflow: auto; user-select: text; -webkit-user-select: text; }
+.notes-doc h2 { font-family: var(--font-display); margin: 0 0 4px; font-size: 21px; font-weight: 600; }
+.notes-doc .sub { color: var(--text-2); margin-bottom: 14px; }
+.notes-doc ul { margin: 0; padding: 0; list-style: none; }
+.notes-doc li { display: flex; gap: 10px; padding: 6px 0; line-height: 1.4; font-size: 13px; border-bottom: .5px solid var(--hair); }
+.notes-doc li i { flex: none; width: 16px; height: 16px; margin-top: 1px; border-radius: 50%; border: 1.5px solid var(--text-3); }
+
+.chat { display: flex; height: 100%; }
+.chat-side { width: 200px; border-right: .5px solid var(--hair); padding: 8px; }
+.chat-side .c { display: flex; gap: 10px; align-items: center; padding: 8px; border-radius: 8px; }
+.chat-side .c.on { background: var(--fill-2); }
+.chat-side .av { width: 32px; height: 32px; border-radius: 50%; flex: none; }
+.chat-side b { font-size: 12.5px; display: block; }
+.chat-side span { font-size: 11px; color: var(--text-2); }
+.chat-main { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 8px; justify-content: flex-end; }
+.bubble { max-width: 70%; padding: 8px 12px; border-radius: 16px; font-size: 13px; line-height: 1.35; }
+.bubble.in { background: var(--fill-2); align-self: flex-start; border-bottom-left-radius: 5px; }
+.bubble.out { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 5px; }
+
+.generic { height: 100%; display: grid; place-content: center; text-align: center; gap: 10px; color: var(--text-2); padding: 20px; }
+.generic .gi { width: 84px; height: 84px; margin: 0 auto; filter: drop-shadow(0 8px 16px rgba(0,0,0,.25)); }
+.generic h3 { margin: 0; color: var(--text); font-family: var(--font-display); font-weight: 600; font-size: 18px; }
+.generic p { margin: 0; max-width: 340px; line-height: 1.45; }
+
+/* ---------- Toasts ---------- */
+#toasts { position: fixed; top: 14px; right: 14px; z-index: 600; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.toast {
+  width: 340px; padding: 12px 14px; border-radius: 16px;
+  display: flex; gap: 12px; align-items: flex-start;
+  pointer-events: auto;
+  animation: toast-in var(--dur) var(--spring) both;
+}
+.toast.out { animation: toast-out .3s var(--ease) both; }
+.toast .t-ico { width: 34px; height: 34px; flex: none; }
+.toast .t-ico svg { width: 100%; height: 100%; }
+.toast b { display: block; font-size: 13px; margin-bottom: 2px; }
+.toast span { font-size: 12.5px; color: var(--text-2); line-height: 1.35; }
+@keyframes toast-in { from { transform: translateX(120%); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes toast-out { to { transform: translateX(30%); opacity: 0; } }
+
+/* ---------- Prototype hint pill ---------- */
+#proto-hint {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 500; display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 12px; white-space: nowrap;
+  transition: opacity .3s, transform .4s var(--spring);
+}
+#proto-hint.gone, body.lp-open #proto-hint { opacity: 0; transform: translate(-50%, -20px); pointer-events: none; }
+#proto-hint .dot-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); }
+#proto-hint button { width: 22px; height: 22px; border-radius: 50%; font-size: 10px; color: var(--text-2); }
+#proto-hint button:hover { background: var(--fill-2); }
+@media (max-width: 760px) { #proto-hint .muted { display: none; } }
+
+/* ---------- Auto-hide reveal zone feedback ---------- */
+#reveal-glow {
+  position: fixed; left: 20%; right: 20%; bottom: 0; height: 3px; z-index: 190;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.75), transparent);
+  opacity: 0; transition: opacity .25s; pointer-events: none;
+}
+#reveal-glow.on { opacity: 1; }

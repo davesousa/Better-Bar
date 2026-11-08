@@ -1,0 +1,82 @@
+/* Laminar Dock prototype — Laminar Settings window. */
+
+.settings-host { height: 100%; }
+.set { display: flex; height: 100%; }
+.set-side {
+  width: 216px; flex: none; padding: 12px 10px; overflow-y: auto;
+  background: var(--fill); border-right: .5px solid var(--hair);
+}
+.set-search {
+  display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; margin-bottom: 10px;
+  border-radius: 8px; background: var(--fill-2); color: var(--text-2);
+}
+.set-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; font-size: 12.5px; color: var(--text); }
+.set-nav { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; font-size: 13px; margin-bottom: 1px; }
+.set-nav:hover { background: var(--fill); }
+.set-nav.on { background: var(--accent); color: #fff; }
+.set-nav .sq { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; color: #fff; flex: none; box-shadow: inset 0 0 0 .5px rgba(255,255,255,.2); }
+
+.set-main { flex: 1; overflow-y: auto; padding: 22px 28px 30px; user-select: none; }
+.set-main::-webkit-scrollbar { width: 10px; }
+.set-main::-webkit-scrollbar-thumb { background: var(--fill-3); border-radius: 5px; border: 3px solid transparent; background-clip: padding-box; }
+.set-main h2 { font-family: var(--font-display); font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+.set-main .lead { color: var(--text-2); margin: 0 0 18px; font-size: 12.5px; }
+.set-group { border-radius: 12px; background: var(--fill); box-shadow: inset 0 0 0 .5px var(--hair); margin-bottom: 16px; animation: grp-in .4s var(--spring) both; }
+@keyframes grp-in { from { opacity: 0; transform: translateY(6px); } }
+.set-row {
+  display: flex; align-items: center; gap: 16px; min-height: 46px; padding: 8px 14px;
+  border-top: .5px solid var(--hair);
+  transition: opacity .2s;
+}
+.set-row:first-child { border-top: 0; }
+.set-row.off { opacity: .4; pointer-events: none; }
+.set-row .lab { flex: 1; min-width: 0; font-size: 13px; }
+.set-row .lab small { display: block; font-size: 11.5px; color: var(--text-2); margin-top: 2px; line-height: 1.35; }
+.set-row .ctl { display: flex; align-items: center; gap: 10px; flex: none; }
+.set-row .rng { width: 220px; display: flex; align-items: center; gap: 10px; }
+.set-row .val { width: 54px; text-align: right; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.set-row .tag { font-size: 10.5px; padding: 1px 6px; border-radius: 5px; background: var(--fill-2); color: var(--text-2); margin-left: 6px; vertical-align: 1px; }
+.sel { height: 28px; border-radius: 7px; border: 0; padding: 0 8px; background: var(--fill-2); font-size: 12.5px; outline: none; }
+
+.swatches { display: flex; gap: 8px; }
+.swatches button { width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 .5px rgba(0,0,0,.2); transition: transform .2s var(--spring); }
+.swatches button:hover { transform: scale(1.12); }
+.swatches button[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--win-bg), 0 0 0 4px currentColor; }
+
+.walls { display: flex; gap: 10px; }
+.walls button { width: 92px; text-align: center; font-size: 11.5px; color: var(--text-2); }
+.walls .wt { width: 92px; height: 56px; border-radius: 8px; overflow: hidden; margin-bottom: 5px; box-shadow: 0 0 0 .5px var(--hair); transition: box-shadow .2s; }
+.walls .wt svg { width: 100%; height: 100%; display: block; }
+.walls button[aria-pressed="true"] .wt { box-shadow: 0 0 0 2px var(--win-bg), 0 0 0 4px var(--accent); }
+.walls button[aria-pressed="true"] { color: var(--text); }
+
+.glass-demo {
+  height: 150px; border-radius: 12px; overflow: hidden; position: relative; margin-bottom: 16px;
+  box-shadow: inset 0 0 0 .5px var(--hair);
+}
+.glass-demo .wpc { position: absolute; inset: -20px; }
+.glass-demo .wpc svg { width: 100%; height: 100%; display: block; }
+.glass-demo .card {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 62%; height: 64px; border-radius: 20px;
+  display: flex; align-items: center; justify-content: center; gap: 10px; padding: 0 14px;
+}
+.glass-demo .card .mini { width: 38px; height: 38px; position: relative; z-index: 2; filter: drop-shadow(0 2px 4px rgba(0,0,0,.25)); }
+.glass-demo .card .mini svg { width: 100%; height: 100%; display: block; }
+.glass-demo .note { position: absolute; left: 12px; bottom: 8px; font-size: 11px; color: rgba(255,255,255,.85); text-shadow: 0 1px 2px rgba(0,0,0,.4); }
+
+.about-hero { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.about-hero .ai { width: 64px; height: 64px; filter: drop-shadow(0 6px 12px rgba(0,0,0,.25)); }
+.about-hero .ai svg { width: 100%; height: 100%; display: block; }
+.about-hero b { font-family: var(--font-display); font-size: 20px; display: block; }
+.about-hero span { color: var(--text-2); }
+.kv { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.kv td { padding: 9px 14px; border-top: .5px solid var(--hair); }
+.kv tr:first-child td { border-top: 0; }
+.kv td:last-child { text-align: right; color: var(--text-2); }
+.json {
+  margin: 0; padding: 12px 14px; max-height: 220px; overflow: auto;
+  font: 11.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--text-2);
+  user-select: text; -webkit-user-select: text; white-space: pre;
+}
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 14px; }
