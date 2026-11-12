@@ -23,6 +23,7 @@ mod taskbar;
 mod tracker;
 mod tray;
 mod ui;
+mod updater;
 mod winkey;
 
 use windows::core::Result;
@@ -54,6 +55,8 @@ pub struct Options {
 
 fn main() -> Result<()> {
     let started = std::time::Instant::now();
+    // Velopack's install / update / uninstall steps run here and exit (see updater.rs).
+    updater::startup();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // `--watchdog <pid> [taskbar-state]`: tiny helper that restores the Windows taskbar

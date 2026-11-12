@@ -1,0 +1,4 @@
+[toolchain]
+# Pinned so this PC and the GitHub release builder use the same Rust (Velopack needs 1.88+).
+channel = "1.99.1"
+profile = "minimal"

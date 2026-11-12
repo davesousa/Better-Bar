@@ -79,6 +79,10 @@ pub const WM_APP_WINKEY: u32 = WM_APP + 4;
 const WM_APP_RESYNC_HOVER: u32 = WM_APP + 5;
 /// The tray icons changed (see tray.rs).
 const WM_APP_TRAY: u32 = WM_APP + 6;
+/// An update check finished (see updater.rs).
+const WM_APP_UPDATE: u32 = WM_APP + 7;
+/// Check for a new Laminar (first soon after start, then every few hours).
+const T_UPDATE_CHECK: usize = 21;
 
 // Menu command ids
 const CMD_NEW: usize = 10;
@@ -113,6 +117,12 @@ const CMD_LP_ADMIN: usize = 51;
 const CMD_LP_DOCK: usize = 52;
 const CMD_LP_PIN: usize = 53;
 const CMD_LP_REVEAL: usize = 54;
+const CMD_UPDATE_NOW: usize = 60;
+const CMD_UPDATE_NOTES: usize = 61;
+const CMD_UPDATE_TOMORROW: usize = 62;
+const CMD_UPDATE_WEEK: usize = 63;
+const CMD_UPDATE_SKIP: usize = 64;
+const CMD_UPDATE_CHECK: usize = 65;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -121,6 +131,8 @@ pub enum Kind {
     Separator,
     Stack,
     Trash,
+    /// A new Laminar version is downloaded and ready to install.
+    Update,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -393,6 +405,10 @@ struct Dock {
     drag_switch: Option<HWND>,
     /// The open previews were opened by a drag (they stay up while it moves to them).
     drag_preview: bool,
+    /// The Laminar version downloaded and ready to install, if any.
+    app_update: Option<String>,
+    /// The user asked to check (so report "up to date" too, and ignore snooze/skip).
+    app_update_manual: bool,
     /// App a Launchpad right-click menu is about.
     lp_menu_app: Option<String>,
     /// An app tile pressed in Launchpad (id, x, y) — becomes a drag into the dock if moved.
@@ -593,8 +609,22 @@ impl Dock {
             v.extend(extra);
         }
         v.push(Item { kind: Kind::Separator, key: "::sep-end".into(), pinned: false });
+        if self.update_icon_visible() {
+            v.push(Item { kind: Kind::Update, key: "::update".into(), pinned: true });
+        }
         v.push(Item { kind: Kind::Trash, key: "::trash".into(), pinned: true });
         v
+    }
+
+    /// Show the update icon: a version is ready, and the user hasn't snoozed or skipped it
+    /// (asking to check by hand overrides both).
+    fn update_icon_visible(&self) -> bool {
+        let Some(v) = &self.app_update else { return false };
+        if self.app_update_manual {
+            return true;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        *v != self.cfg.update_skip && now >= self.cfg.update_snooze_until
     }
 
     /// (pin index, name, app ids) of a stack item.
@@ -622,6 +652,10 @@ impl Dock {
         let px = (self.cfg.magnified_size.max(self.cfg.icon_size) * self.scale).ceil();
         let surface = match it.kind {
             Kind::Launch => self.gfx.logo_surface(px).ok(),
+            Kind::Update => {
+                self.names.insert(it.key.clone(), "Update Laminar".into());
+                self.gfx.update_surface(px).ok()
+            }
             Kind::Trash => self.icons.get(&self.gfx.wic, apps::RECYCLE_BIN).and_then(|(n, src)| {
                 self.names.insert(it.key.clone(), n);
                 self.gfx.icon_surface(&src, px).ok()
@@ -1384,6 +1418,7 @@ impl Dock {
         match it.kind {
             Kind::Launch => self.toggle_launchpad(),
             Kind::Trash => apps::launch(apps::RECYCLE_BIN),
+            Kind::Update => self.update_menu(),
             Kind::Separator => {}
             Kind::Stack => {
                 if self.stack_view.open {
@@ -1462,6 +1497,9 @@ impl Dock {
         } else if item.as_ref().map(|it| it.kind == Kind::Trash).unwrap_or(false) {
             m.push(MenuItem::item("Open Recycle Bin", CMD_TRASH_OPEN));
             m.push(MenuItem::sep());
+        } else if item.as_ref().map(|it| it.kind == Kind::Update).unwrap_or(false) {
+            m.extend(self.update_menu_items());
+            m.push(MenuItem::sep());
         } else if item.as_ref().map(|it| it.kind == Kind::Launch).unwrap_or(false) {
             m.push(MenuItem::item("Task Manager", CMD_TASKMGR).shortcut("Ctrl+Shift+Esc"));
             m.push(MenuItem::item("Settings", CMD_WINSETTINGS));
@@ -1478,6 +1516,9 @@ impl Dock {
         m.push(MenuItem::item("Hide the Windows Taskbar", CMD_TASKBAR).checked(self.cfg.hide_windows_taskbar));
         m.push(MenuItem::sep());
         m.push(MenuItem::item("Dock Settings…", CMD_SETTINGS));
+        if crate::updater::installed() {
+            m.push(MenuItem::item("Check for Updates…", CMD_UPDATE_CHECK));
+        }
         m.push(MenuItem::item("Quit Laminar", CMD_QUIT));
 
         self.hide_preview();
@@ -1519,6 +1560,11 @@ impl Dock {
 
     /// --demo NAME: open a surface automatically so it can be captured and checked.
     fn run_demo(&mut self, name: &str) {
+        // Test docks only: LAMINAR_DEMO_UPDATE=0.1.1 shows the update icon as if that version were ready.
+        if let Ok(v) = std::env::var("LAMINAR_DEMO_UPDATE") {
+            self.app_update = Some(v);
+            self.refresh(true);
+        }
         let g = &self.geo;
         let i = 4.min(g.left.len().saturating_sub(1));
         let (x, y) = (g.center_abs(i), g.y0 + g.shelf_h / 2.0);
@@ -1528,7 +1574,7 @@ impl Dock {
                 self.on_move(x, y);
                 self.context_menu(x, y, Some(anchor));
             }
-            "launchpad" | "lp-all" | "lp-search" | "lp-settings" | "lp-wifi" | "lp-wifi-sample" => {
+            "launchpad" | "lp-all" | "lp-search" | "lp-settings" | "lp-about" | "lp-wifi" | "lp-wifi-sample" => {
                 self.open_launchpad();
                 match name {
                     "lp-all" => self.lp_act(Act::ToggleAll),
@@ -1539,6 +1585,10 @@ impl Dock {
                         self.lp_query_changed();
                     }
                     "lp-settings" => self.lp_act(Act::OpenSettings),
+                    "lp-about" => {
+                        self.lp_act(Act::OpenSettings);
+                        self.lp_act(Act::Section(3));
+                    }
                     "lp-wifi" => self.lp_act(Act::WifiMenu),
                     "lp-wifi-sample" => {
                         // Layout check with made-up networks (real replies are ignored in this mode).
@@ -1588,6 +1638,119 @@ impl Dock {
         if self.drag.is_none() {
             self.resync_hover();
         }
+    }
+
+    // ---------------------------------------------------------------- Laminar updates
+
+    fn update_menu_items(&self) -> Vec<MenuItem> {
+        let v = self.app_update.clone().unwrap_or_default();
+        vec![
+            MenuItem::header(format!("Laminar {v} is ready to install")),
+            MenuItem::item("Restart and Update", CMD_UPDATE_NOW),
+            MenuItem::item("What's New", CMD_UPDATE_NOTES),
+            MenuItem::sep(),
+            MenuItem::item("Remind Me Tomorrow", CMD_UPDATE_TOMORROW),
+            MenuItem::item("Remind Me Next Week", CMD_UPDATE_WEEK),
+            MenuItem::item("Skip This Version", CMD_UPDATE_SKIP),
+        ]
+    }
+
+    /// A small message menu above the dock (update results).
+    fn notice(&mut self, lines: &[String]) {
+        let mut m: Vec<MenuItem> = Vec::new();
+        for (k, l) in lines.iter().enumerate() {
+            m.push(if k == 0 { MenuItem::header(l.clone()) } else { MenuItem { enabled: false, ..MenuItem::item(l.clone(), 0) } });
+        }
+        m.push(MenuItem::sep());
+        m.push(MenuItem::item("OK", 0));
+        self.open_menu_at_cursor(m);
+    }
+
+    fn update_menu(&mut self) {
+        let m = self.update_menu_items();
+        self.open_menu_at_cursor(m);
+    }
+
+    fn open_menu_at_cursor(&mut self, m: Vec<MenuItem>) {
+        self.hide_preview();
+        self.stack_view.hide();
+        self.menu_stack = None;
+        self.menu_ctx = None;
+        self.menu_open = true;
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        if let Err(e) = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, m, p, true, self.scale, self.monitor) {
+            trace!("menu failed: {e:?}");
+            self.menu_open = false;
+        }
+    }
+
+    /// Ask GitHub for a newer Laminar (installed copies only).
+    fn check_for_update(&mut self, manual: bool) {
+        if !crate::updater::installed() {
+            if manual {
+                self.notice(&["This copy of Laminar can't update itself".into(), "Only copies installed with Setup.exe check for updates.".into()]);
+            }
+            return;
+        }
+        self.app_update_manual |= manual;
+        trace!("update check started (manual={manual})");
+        crate::updater::check(self.hwnd, WM_APP_UPDATE);
+        self.lp_render_about();
+    }
+
+    fn on_update_checked(&mut self) {
+        use crate::updater::Status;
+        let st = crate::updater::status();
+        trace!("update check: {st:?}");
+        let manual = self.app_update_manual;
+        match &st {
+            Status::Ready(v) => {
+                self.app_update = Some(v.clone());
+                self.refresh(false);
+                if manual {
+                    self.update_menu();
+                }
+            }
+            Status::UpToDate if manual => {
+                self.app_update_manual = false;
+                self.notice(&[format!("Laminar {} is up to date", crate::updater::version_label())]);
+            }
+            Status::Failed(e) if manual => {
+                self.app_update_manual = false;
+                self.notice(&["Couldn't check for updates".into(), e.chars().take(80).collect()]);
+            }
+            _ => self.app_update_manual = false,
+        }
+        self.lp_render_about();
+    }
+
+    /// Settings → About shows the update status; redraw it if it's on screen.
+    fn lp_render_about(&mut self) {
+        if self.launchpad.open && self.launchpad.settings == Some(3) {
+            self.lp_render("all");
+        }
+    }
+
+    fn update_status_line(&self) -> String {
+        use crate::updater::Status;
+        match crate::updater::status() {
+            Status::NotInstalled => "Developer build: updates are off.".into(),
+            Status::Idle => if crate::updater::installed() { "Updates: not checked yet.".into() } else { "Developer build: updates are off.".into() },
+            Status::Checking => "Checking for updates…".into(),
+            Status::UpToDate => "Up to date.".into(),
+            Status::Ready(v) => format!("Version {v} is ready: click the update icon in the dock."),
+            Status::Failed(e) => format!("Update check failed: {}", e.chars().take(70).collect::<String>()),
+        }
+    }
+
+    fn snooze_update(&mut self, secs: u64) {
+        let until = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) + secs;
+        self.app_update_manual = false;
+        self.save_and_apply(|c| c.update_snooze_until = until);
+        self.refresh(false);
     }
 
     fn save_and_apply(&mut self, f: impl FnOnce(&mut Config)) {
@@ -1641,6 +1804,30 @@ impl Dock {
                 }
                 self.lp_act(Act::OpenSettings);
             }
+            CMD_UPDATE_NOW => match crate::updater::begin_install() {
+                Ok(()) => unsafe {
+                    // Velopack's updater waits for this process to exit, installs, and
+                    // starts the new version. Quit cleanly so the taskbar is restored meanwhile.
+                    trace!("installing update: quitting so the updater can replace files");
+                    self.shutdown();
+                    let _ = DestroyWindow(self.hwnd);
+                },
+                Err(e) => self.notice(&["Couldn't start the update".into(), e]),
+            },
+            CMD_UPDATE_NOTES => {
+                if let Some(v) = &self.app_update {
+                    apps::launch(&crate::updater::notes_url(v));
+                }
+            }
+            CMD_UPDATE_TOMORROW => self.snooze_update(24 * 3600),
+            CMD_UPDATE_WEEK => self.snooze_update(7 * 24 * 3600),
+            CMD_UPDATE_SKIP => {
+                let v = self.app_update.clone().unwrap_or_default();
+                self.app_update_manual = false;
+                self.save_and_apply(|c| c.update_skip = v);
+                self.refresh(false);
+            }
+            CMD_UPDATE_CHECK => self.check_for_update(true),
             CMD_QUIT => unsafe {
                 // Clean up here: WM_DESTROY can't reach the dock while this handler holds it.
                 self.shutdown();
@@ -2153,6 +2340,8 @@ impl Dock {
             self.names.entry(a.id.clone()).or_insert_with(|| a.name.clone());
         }
         let tray = self.tray_views();
+        let app_version = crate::updater::version_label();
+        let app_update = self.update_status_line();
         let data = lp::Data {
             apps: &self.lp_apps,
             brushes: &self.brushes,
@@ -2167,6 +2356,8 @@ impl Dock {
             wifi: self.wifi.as_ref(),
             tray: &tray,
             update: self.update.as_ref(),
+            app_version: &app_version,
+            app_update: &app_update,
         };
         self.launchpad.update_results(&data);
         let (c, gfx) = (self.compositor.clone(), &self.gfx);
@@ -2276,6 +2467,8 @@ impl Dock {
         }
         let reserve = self.geo.shelf_h + 2.0 * self.geo.margin;
         let tray = self.tray_views();
+        let app_version = crate::updater::version_label();
+        let app_update = self.update_status_line();
         let data = lp::Data {
             apps: &self.lp_apps,
             brushes: &self.brushes,
@@ -2290,6 +2483,8 @@ impl Dock {
             wifi: self.wifi.as_ref(),
             tray: &tray,
             update: self.update.as_ref(),
+            app_version: &app_version,
+            app_update: &app_update,
         };
         let (c, gfx, bd) = (self.compositor.clone(), &self.gfx, self.backdrop.clone());
         if let Err(e) = self.launchpad.show(&c, gfx, &bd, self.monitor, reserve, self.scale, &data) {
@@ -2385,6 +2580,7 @@ impl Dock {
                 self.close_launchpad();
                 apps::launch(&u);
             }
+            Act::CheckUpdates => self.check_for_update(true),
             Act::Web(q) => {
                 self.close_launchpad();
                 let enc: String = q
@@ -3436,6 +3632,12 @@ impl Dock {
     fn apply_config(&mut self, new: Config) {
         let old = std::mem::replace(&mut self.cfg, new);
         crate::winkey::set_enabled(self.cfg.win_key_launchpad);
+        if old.start_at_login != self.cfg.start_at_login && self.is_main_dock() {
+            crate::updater::set_start_at_login(self.cfg.start_at_login);
+        }
+        if !old.check_updates && self.cfg.check_updates && self.is_main_dock() {
+            unsafe { SetTimer(Some(self.hwnd), T_UPDATE_CHECK, 2000, None) };
+        }
         if old.extra_blur != self.cfg.extra_blur {
             self.update_glass();
             let _ = self.build_label();
@@ -3459,6 +3661,11 @@ impl Dock {
             }
         }
         self.apply_system();
+    }
+
+    /// The real dock on the main display (not a helper or test copy).
+    fn is_main_dock(&self) -> bool {
+        self.integrate && self.opts.monitor.is_none()
     }
 
     fn shutdown(&mut self) {
@@ -3645,6 +3852,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             });
             return LRESULT(0);
         }
+        WM_APP_UPDATE => {
+            with_dock(|d| d.on_update_checked());
+            return LRESULT(0);
+        }
         WM_APP_TRAY => {
             with_dock(|d| {
                 if d.launchpad.open {
@@ -3674,6 +3885,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 },
                 T_REVEAL => d.on_reveal_timer(),
                 T_TRAY_RAISE => crate::tray::raise(),
+                T_UPDATE_CHECK => unsafe {
+                    // Then every 6 hours.
+                    SetTimer(Some(hwnd), T_UPDATE_CHECK, 6 * 3600 * 1000, None);
+                    if d.cfg.check_updates {
+                        d.check_for_update(false);
+                    }
+                },
                 T_TRAY_RENDER => unsafe {
                     let _ = KillTimer(Some(hwnd), T_TRAY_RENDER);
                     d.lp_render("right");
@@ -4052,6 +4270,8 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             drag_under: None,
             drag_switch: None,
             drag_preview: false,
+            app_update: None,
+            app_update_manual: false,
             menu_ctx: None,
             integrate,
             helper: opts.monitor.is_some(),
@@ -4105,6 +4325,13 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             if crate::tray::active() {
                 SetTimer(Some(hwnd), T_TRAY_RAISE, 1500, None);
             }
+            // Installed copies: keep the sign-in entry in step with the setting, and look
+            // for updates once things have settled.
+            if crate::updater::installed() {
+                crate::updater::set_start_at_login(dock.cfg.start_at_login);
+                SetTimer(Some(hwnd), T_UPDATE_CHECK, 20_000, None);
+            }
+            trace!("Laminar {}", crate::updater::version_label());
         }
         if let Some(pid) = opts.parent {
             crate::displays::watch_parent(pid, hwnd);

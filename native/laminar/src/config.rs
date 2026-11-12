@@ -57,6 +57,16 @@ pub struct Config {
     /// Extra blur (pixels) on top of Windows' own background blur. 0: Windows' blur only.
     pub extra_blur: f32,
 
+    // Install and updates (installed copies only; see updater.rs)
+    /// Start Laminar when the user signs in to Windows.
+    pub start_at_login: bool,
+    /// Check GitHub for new versions and download them quietly.
+    pub check_updates: bool,
+    /// Unix time (seconds) before which the update icon stays hidden ("Remind me later").
+    pub update_snooze_until: u64,
+    /// A version the user chose to skip.
+    pub update_skip: String,
+
     // Behaviour
     /// Slide the dock off-screen; bring it back by pushing the pointer into the bottom edge.
     pub auto_hide: bool,
@@ -100,6 +110,10 @@ impl Default for Config {
             edge_highlight: 0.55,
             match_windows_theme: true,
             extra_blur: 0.0,
+            start_at_login: true,
+            check_updates: true,
+            update_snooze_until: 0,
+            update_skip: String::new(),
             auto_hide: false,
             reveal_zone: 4.0,
             reveal_delay_ms: 120,

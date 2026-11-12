@@ -1,0 +1,69 @@
+# Builds Laminar and publishes it as a GitHub Release that installed copies update from.
+#
+# To release: set `version` in native/laminar/Cargo.toml (for example 0.1.1), commit,
+# then push a matching tag:  git tag v0.1.1  &&  git push origin v0.1.1
+#
+# Velopack (vpk) makes Setup.exe, the full update package, a delta from the previous
+# release, and the feed file (releases.win.json) the app reads.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload its files
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      VPK_VERSION: 1.2.161 # keep in step with the velopack crate in native/laminar/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version' native/laminar/Cargo.toml | cut -d'"' -f2)
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Rust (version pinned in rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Build
+        run: cargo build --release --locked -p laminar
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version $env:VPK_VERSION
+
+      - name: Package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir publish
+          cp target/release/laminar.exe publish/
+          # The previous release, so vpk can build a small delta update from it (none for the first).
+          vpk download github --repoUrl "https://github.com/${{ github.repository }}" --token "$GH_TOKEN" -o Releases || true
+          vpk pack -u LaminarDock -v "$VERSION" -p publish -e laminar.exe \
+            --packTitle "Laminar Dock" --packAuthors "Dave Sousa" -o Releases
+
+      - name: Publish the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          vpk upload github --repoUrl "https://github.com/${{ github.repository }}" --token "$GH_TOKEN" \
+            -o Releases --publish --releaseName "Laminar Dock $VERSION" --tag "v$VERSION"

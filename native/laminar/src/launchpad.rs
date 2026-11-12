@@ -79,6 +79,8 @@ pub enum Act {
     Toggle(&'static str),
     Slider(&'static str),
     OpenConfig,
+    /// Check GitHub for a newer Laminar now.
+    CheckUpdates,
     WinSettings,
     Snip,
     Lock,
@@ -149,6 +151,10 @@ fn section_rows(i: usize) -> Vec<Row> {
             r("show_on_all_displays", "Show the dock on all displays", "Otherwise only on the main display.", Toggle),
             r("per_display_windows", "Each display shows only its own windows", "Pinned apps always show.", Toggle),
         ],
+        3 => vec![
+            r("start_at_login", "Start Laminar when you sign in", "Installed copies only.", Toggle),
+            r("check_updates", "Check for updates automatically", "New versions download quietly; an icon in the dock offers to install them.", Toggle),
+        ],
         _ => vec![],
     }
 }
@@ -176,6 +182,8 @@ pub fn cfg_get(c: &Config, key: &str) -> f32 {
         "hide_windows_taskbar" => b(c.hide_windows_taskbar),
         "show_on_all_displays" => b(c.show_on_all_displays),
         "per_display_windows" => b(c.per_display_windows),
+        "start_at_login" => b(c.start_at_login),
+        "check_updates" => b(c.check_updates),
         _ => 0.0,
     }
 }
@@ -198,6 +206,8 @@ pub fn cfg_set(c: &mut Config, key: &str, v: f32) {
         "reveal_delay_ms" => c.reveal_delay_ms = v as u32,
         "hide_delay_ms" => c.hide_delay_ms = v as u32,
         "click_to_minimize" => c.click_to_minimize = v > 0.5,
+        "start_at_login" => c.start_at_login = v > 0.5,
+        "check_updates" => c.check_updates = v > 0.5,
         "win_key_launchpad" => c.win_key_launchpad = v > 0.5,
         "hide_windows_taskbar" => c.hide_windows_taskbar = v > 0.5,
         "show_on_all_displays" => c.show_on_all_displays = v > 0.5,
@@ -254,6 +264,9 @@ pub struct Data<'a> {
     pub tray: &'a [TrayView],
     /// Windows Update status (None until the first check finishes).
     pub update: Option<&'a laminar_sys::update::UpdateStatus>,
+    /// Laminar's version and its update status, for Settings → About.
+    pub app_version: &'a str,
+    pub app_update: &'a str,
 }
 
 /// A tray icon as Launchpad shows it.
@@ -903,8 +916,10 @@ impl Launchpad {
         let mut y = ty + 56.0 * s;
         let row_w = pw - 2.0 * pad;
         if sec == 3 {
+            let title = format!("Laminar Dock {}", d.app_version);
             let lines = [
-                "Laminar Dock — native build",
+                title.as_str(),
+                d.app_update,
                 "Rust · Windows Composition · Direct2D/DirectWrite",
                 "Changes here apply immediately and are saved to config.json.",
             ];
@@ -917,7 +932,11 @@ impl Launchpad {
             Self::rect(c, content, pad, y, bw, bh, 9.0 * s, theme::ink(0.14))?;
             Self::txt(c, gfx, content, "Open settings file", TextStyle { px: 12.5 * s, weight: 500, center: true, max_w: Some(bw), ..Default::default() }, pad, y + 8.0 * s)?;
             self.hit(PanelId::Center, (ox + pad, oy + y, bw, bh), Act::OpenConfig, 9.0 * s, true, false);
-            return Ok(());
+            let ux = pad + bw + 12.0 * s;
+            Self::rect(c, content, ux, y, bw, bh, 9.0 * s, theme::ink(0.14))?;
+            Self::txt(c, gfx, content, "Check for updates", TextStyle { px: 12.5 * s, weight: 500, center: true, max_w: Some(bw), ..Default::default() }, ux, y + 8.0 * s)?;
+            self.hit(PanelId::Center, (ox + ux, oy + y, bw, bh), Act::CheckUpdates, 9.0 * s, true, false);
+            y += bh + 20.0 * s;
         }
         let rows = section_rows(sec);
         Self::rect(c, content, pad, y, row_w, rows.len() as f32 * 56.0 * s, 14.0 * s, theme::ink(0.06))?;

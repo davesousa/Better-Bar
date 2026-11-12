@@ -2,8 +2,8 @@
 name = "laminar"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
-description = "Laminar Dock: Phase 0 native spike (Rust + Windows Composition)"
+rust-version = "1.88"
+description = "Laminar Dock: a dock and Launchpad for Windows (Rust + Windows Composition)"
 publish = false
 
 [dependencies]
@@ -13,6 +13,7 @@ serde_json = "1.0"
 laminar-sys = { path = "../laminar-sys" }
 # Same version the windows crate already uses; needed directly for #[implement] (COM objects).
 windows-core = "0.62.2"
+velopack = "1.2.161"
 
 [dependencies.windows]
 version = "0.62.2"
@@ -59,6 +60,7 @@ features = [
     "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",

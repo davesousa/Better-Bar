@@ -194,6 +194,54 @@ impl Gfx {
         Ok(surface)
     }
 
+    /// The dock's "update ready" icon: a green-to-blue tile with a white download arrow.
+    pub fn update_surface(&self, px: f32) -> Result<CompositionDrawingSurface> {
+        let surface = self.surface(px, px)?;
+        let tile = self.squircle(0.0, 0.0, px)?;
+        self.draw(&surface, |dc| unsafe {
+            let grad = self.stops(dc, &[(0.0, color(0.20, 0.80, 0.52, 1.0)), (1.0, color(0.12, 0.50, 0.95, 1.0))])?;
+            let fill = dc.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(0.0, 0.0), endPoint: pt(px, px) },
+                None,
+                &grad,
+            )?;
+            dc.FillGeometry(&tile, &fill, None);
+            let k = px / 100.0;
+            let base: &ID2D1Factory = &self.factory;
+            let cap = base.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES {
+                    startCap: D2D1_CAP_STYLE_ROUND,
+                    endCap: D2D1_CAP_STYLE_ROUND,
+                    lineJoin: D2D1_LINE_JOIN_ROUND,
+                    ..Default::default()
+                },
+                None,
+            )?;
+            let white = dc.CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 1.0), None)?;
+            let g = self.factory.CreatePathGeometry()?;
+            let s = g.Open()?;
+            // Shaft, arrow head, and the tray it lands in.
+            s.BeginFigure(pt(50.0 * k, 24.0 * k), D2D1_FIGURE_BEGIN_HOLLOW);
+            s.AddLine(pt(50.0 * k, 62.0 * k));
+            s.EndFigure(D2D1_FIGURE_END_OPEN);
+            s.BeginFigure(pt(34.0 * k, 47.0 * k), D2D1_FIGURE_BEGIN_HOLLOW);
+            s.AddLine(pt(50.0 * k, 63.0 * k));
+            s.AddLine(pt(66.0 * k, 47.0 * k));
+            s.EndFigure(D2D1_FIGURE_END_OPEN);
+            s.BeginFigure(pt(29.0 * k, 66.0 * k), D2D1_FIGURE_BEGIN_HOLLOW);
+            s.AddLine(pt(29.0 * k, 76.0 * k));
+            s.AddLine(pt(71.0 * k, 76.0 * k));
+            s.AddLine(pt(71.0 * k, 66.0 * k));
+            s.EndFigure(D2D1_FIGURE_END_OPEN);
+            s.Close()?;
+            dc.DrawGeometry(&g, &white, 7.0 * k, &cap);
+            let rim = dc.CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.24), None)?;
+            dc.DrawGeometry(&tile, &rim, 1.2 * k, None);
+            Ok(())
+        })?;
+        Ok(surface)
+    }
+
     /// Specular rim for the glass shelf. Used as a nine-grid so the corners never stretch.
     pub fn rim_surface(&self, w: f32, h: f32, radius: f32, edge: f32) -> Result<CompositionDrawingSurface> {
         let surface = self.surface(w, h)?;
