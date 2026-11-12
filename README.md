@@ -199,7 +199,7 @@ Dave's request: drag a file from one window into another without having both on 
 | 2. Move up onto a tile and hold still | After 0.5 s that window comes forward and the tiles close; dropping on a tile does the same at once. |
 | 3. Move into the window and let go | The window receives the drop as usual. |
 
-How: the window tiles get their own drop target (the same OLE mechanism the dock uses). Windows only lets the app that sent the last input change the front window, and during a drag that's the app being dragged from, so Laminar first sends an empty mouse input (no movement or clicks), the step PowerToys uses. Checked: builds and installed on Dave's dock; ⚠️ the drag itself needs Dave's hand test (no automated mouse tests on his PC).
+How: the window tiles get their own drop target (the same OLE mechanism the dock uses). Windows only lets the app that sent the last input change the front window, and during a drag that's the app being dragged from, so Laminar first sends an empty mouse input (no movement or clicks), the step PowerToys uses. Checked: ✅ Dave tested it by hand on 2026-11-11 ("works well").
 
 ### Known gaps
 
