@@ -213,11 +213,14 @@ Decision (Dave, 2026-11-11): use [Velopack](https://docs.velopack.io/) with upda
 | Update icon | A green download tile appears before the Recycle Bin. Click: **Restart and Update**, **What's New** (the release page), **Remind Me Tomorrow**, **Remind Me Next Week**, **Skip This Version**. Nothing installs until Restart and Update. |
 | Installing an update | Laminar starts Velopack's updater, quits cleanly (Windows' taskbar comes back), the updater swaps the files and starts the new version. |
 | Uninstall | Windows Settings → Apps. Laminar's uninstall step quits the running dock (restoring the taskbar) and removes the sign-in entry. |
-| Developer builds | A copy not installed by Setup.exe (like `targetelease`) shows "developer build", never checks for updates and never touches the sign-in entry. |
+| Developer builds | A copy not installed by Setup.exe (like `target
+elease`) shows "developer build", never checks for updates and never touches the sign-in entry. |
 | Releasing | Set `version` in `native/laminar/Cargo.toml`, commit, push a matching tag (`git tag v0.1.1`, `git push origin v0.1.1`). `.github/workflows/release.yml` builds, packages with `vpk` 1.2.161 (including a delta from the previous release) and publishes the GitHub Release. |
 | Toolchain | Velopack needs Rust 1.88+, so `rust-toolchain.toml` pins Rust 1.99.1 for this repo (Dave's default toolchain is unchanged); the release builder uses the same. |
 
 Checked on this PC (2026-11-11): builds with no warnings; `vpk pack` made Setup.exe (10.8 MB), the full package and the feed; the update icon draws in a test dock; the installed-update check against GitHub runs (`cargo run --release -p laminar --example update_feed -- 0.0.1`). Not installed here because an installed copy would share the one-dock lock with Dave's running dock, and uninstalling would close it. ⚠️ Install, update and uninstall need the test on Dave's other machine. Unsigned for now, so Windows shows "Windows protected your PC" (More info → Run anyway); signing is a later decision.
+
+First release (2026-11-12): [v0.1.0](https://github.com/davesousa/Better-Bar/releases/tag/v0.1.0), published by the workflow on its first run. ✅ The release has Setup.exe, the full package and `releases.win.json`; the update check run as an installed 0.0.1 is offered 0.1.0, and as 0.1.0 is told it's up to date.
 
 ### Known gaps
 
