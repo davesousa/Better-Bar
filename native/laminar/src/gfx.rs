@@ -16,7 +16,6 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::Graphics::Gdi::{HBITMAP, HPALETTE};
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::WinRT::Composition::{ICompositionDrawingSurfaceInterop, ICompositorInterop};
@@ -90,15 +89,12 @@ impl Gfx {
         }
     }
 
-    /// A shell icon (HBITMAP) scaled into a square surface with high-quality filtering.
-    pub fn icon_surface(&self, bitmap: HBITMAP, px: f32) -> Result<CompositionDrawingSurface> {
+    /// An icon (premultiplied BGRA from the icon cache) scaled into a square surface with high-quality filtering.
+    pub fn icon_surface(&self, src: &IWICBitmapSource, px: f32) -> Result<CompositionDrawingSurface> {
         let surface = self.surface(px, px)?;
         unsafe {
-            let wic_bmp = self.wic.CreateBitmapFromHBITMAP(bitmap, HPALETTE::default(), WICBitmapUseAlpha)?;
-            let conv = self.wic.CreateFormatConverter()?;
-            conv.Initialize(&wic_bmp, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
             self.draw(&surface, |dc| {
-                let bmp = dc.CreateBitmapFromWicBitmap(&conv, None)?;
+                let bmp = dc.CreateBitmapFromWicBitmap(src, None)?;
                 dc.DrawBitmap(
                     &bmp,
                     Some(&rect(0.0, 0.0, px.ceil(), px.ceil())),
@@ -221,29 +217,110 @@ impl Gfx {
 
     /// Text for a hover label. Returns the surface and its pixel size.
     pub fn text_surface(&self, text: &str, font_px: f32) -> Result<(CompositionDrawingSurface, f32, f32)> {
+        self.text(text, &TextStyle { px: font_px, ..Default::default() })
+    }
+
+    /// Render one line (or a wrapped block) of text. Returns the surface and its pixel size.
+    pub fn text(&self, text: &str, st: &TextStyle) -> Result<(CompositionDrawingSurface, f32, f32)> {
         unsafe {
+            let family = if st.icons {
+                "Segoe Fluent Icons"
+            } else if st.display {
+                "Segoe UI Variable Display"
+            } else {
+                "Segoe UI Variable Text"
+            };
             let format = self.dwrite.CreateTextFormat(
-                &HSTRING::from("Segoe UI Variable Text"),
+                &HSTRING::from(family),
                 None,
-                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_WEIGHT(st.weight as i32),
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                font_px,
+                st.px,
                 &HSTRING::from("en-us"),
             )?;
+            let max_w = st.max_w.unwrap_or(4000.0);
+            if !st.wrap {
+                format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                if st.max_w.is_some() {
+                    // Trim with an ellipsis rather than overflowing.
+                    let sign = self.dwrite.CreateEllipsisTrimmingSign(&format)?;
+                    let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
+                    format.SetTrimming(&trim, &sign)?;
+                }
+            }
+            if st.center {
+                format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            }
             let wide: Vec<u16> = text.encode_utf16().collect();
-            let layout = self.dwrite.CreateTextLayout(&wide, &format, 2000.0, 200.0)?;
+            let layout = self.dwrite.CreateTextLayout(&wide, &format, max_w, 2000.0)?;
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
-            let (w, h) = (m.widthIncludingTrailingWhitespace.ceil() + 2.0, m.height.ceil() + 2.0);
+            let w = if st.center || st.max_w.is_some() && m.widthIncludingTrailingWhitespace > max_w {
+                max_w.min(m.widthIncludingTrailingWhitespace.max(if st.center { max_w } else { 0.0 }))
+            } else {
+                m.widthIncludingTrailingWhitespace
+            };
+            let (w, h) = (w.ceil().max(1.0) + 2.0, m.height.ceil() + 2.0);
             let surface = self.surface(w, h)?;
+            let (r, g, b, a) = st.color;
             self.draw(&surface, |dc| {
-                let brush = dc.CreateSolidColorBrush(&color(0.96, 0.96, 0.97, 1.0), None)?;
+                let brush = dc.CreateSolidColorBrush(&color(r, g, b, a), None)?;
+                dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                if st.center {
+                    // Centre within the surface width.
+                    layout.SetMaxWidth(w - 2.0)?;
+                }
                 dc.DrawTextLayout(pt(1.0, 1.0), &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
                 Ok(())
             })?;
             Ok((surface, w, h))
         }
+    }
+
+    /// A soft drop shadow for a rounded panel, drawn as stacked translucent rounded
+    /// rectangles (cheap, smooth). Used as a nine-grid: insets = radius + blur.
+    pub fn shadow_surface(&self, radius: f32, blur: f32, alpha: f32) -> Result<CompositionDrawingSurface> {
+        let size = ((radius + blur) * 2.0 + 4.0).ceil();
+        let surface = self.surface(size, size)?;
+        self.draw(&surface, |dc| unsafe {
+            let steps = (blur.ceil() as i32).max(1);
+            for i in 0..steps {
+                // Outer layers are faint, inner layers stronger: approximates a Gaussian falloff.
+                let k = i as f32 / steps as f32;
+                let inset = blur * k;
+                let a = alpha / steps as f32 * (0.4 + 1.6 * k);
+                let b = dc.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, a.min(1.0)), None)?;
+                let r = radius + blur - inset;
+                let rr = D2D1_ROUNDED_RECT { rect: rect(inset, inset, size - inset, size - inset), radiusX: r, radiusY: r };
+                dc.FillRoundedRectangle(&rr, &b);
+            }
+            Ok(())
+        })?;
+        Ok(surface)
+    }
+}
+
+/// How to render text.
+#[derive(Clone, Debug)]
+pub struct TextStyle {
+    pub px: f32,
+    /// 400 regular, 500 medium, 600 semibold, 700 bold, 300 light.
+    pub weight: u32,
+    pub color: (f32, f32, f32, f32),
+    /// Trim (or wrap) at this width in pixels.
+    pub max_w: Option<f32>,
+    pub wrap: bool,
+    pub center: bool,
+    /// Use the Display optical size (large titles).
+    pub display: bool,
+    /// Render glyphs from the Segoe Fluent Icons font (Windows 11 system icons).
+    pub icons: bool,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self { px: 13.0, weight: 400, color: crate::ui::theme::text(), max_w: None, wrap: false, center: false, display: false, icons: false }
     }
 }
 

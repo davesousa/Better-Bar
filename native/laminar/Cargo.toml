@@ -8,6 +8,11 @@ publish = false
 
 [dependencies]
 windows-numerics = "0.3.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+laminar-sys = { path = "../laminar-sys" }
+# Same version the windows crate already uses; needed directly for #[implement] (COM objects).
+windows-core = "0.62.2"
 
 [dependencies.windows]
 version = "0.62.2"
@@ -16,6 +21,7 @@ features = [
     "Foundation_Numerics",
     "Graphics",
     "Graphics_DirectX",
+    "Graphics_Effects",
     "System",
     "UI",
     "UI_Composition",
@@ -31,16 +37,30 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
+    "Win32_Security",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
     "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics",
+    "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ]

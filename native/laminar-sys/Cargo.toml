@@ -1,0 +1,53 @@
+[package]
+name = "laminar-sys"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Laminar Dock: system services (apps, search, audio, media, radios, theme, stats, weather)"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    # WinRT
+    "Foundation",
+    "Foundation_Collections",
+    "Media",
+    "Media_Control",
+    "Storage",
+    "Storage_Search",
+    "Storage_Streams",
+    "Graphics",
+    "Graphics_Imaging",
+    "Devices",
+    "Devices_Radios",
+    # Win32
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_Registry",
+    "Win32_System_Shutdown",
+    "Win32_System_UpdateAgent",
+    "Win32_System_Power",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WiFi",
+    "Win32_Networking_WinHttp",
+]

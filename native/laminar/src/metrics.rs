@@ -45,13 +45,3 @@ pub fn memory() -> Memory {
         private_working_set: pmc.PrivateWorkingSetSize as f64 / MB,
     }
 }
-
-/// (working set MB, private bytes MB) — kept for the existing report fields.
-pub fn memory_mb() -> (f64, f64) {
-    let m = memory();
-    (m.working_set, m.private_bytes)
-}
-
-pub fn cores() -> f64 {
-    std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0)
-}
