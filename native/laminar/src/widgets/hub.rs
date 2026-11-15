@@ -147,6 +147,7 @@ enum Job {
     SetBrightness(f32),
     Output,
     ApplyWallpaper(String),
+    Geocode(String),
 }
 
 enum Reply {
@@ -154,6 +155,7 @@ enum Reply {
     Mic(Option<bool>),
     Brightness(Option<f32>),
     Output(Option<String>),
+    Geocode(String, Option<(f32, f32, String)>),
 }
 
 pub struct Hub {
@@ -175,6 +177,8 @@ pub struct Hub {
     pub wallpaper_img: Option<(String, IWICBitmapSource)>,
     pub art_img: Option<(u64, IWICBitmapSource)>,
     pub desktop_shown: bool,
+    /// A weather location lookup that finished: (what was typed, (lat, lon, place)).
+    pub geocoded: Option<(String, Option<(f32, f32, String)>)>,
     hwnd: isize,
     replies: Arc<Mutex<Vec<Reply>>>,
 }
@@ -201,6 +205,7 @@ impl Hub {
             wallpaper_img: None,
             art_img: None,
             desktop_shown: false,
+            geocoded: None,
             hwnd: notify.0 as isize,
             replies: Arc::new(Mutex::new(Vec::new())),
         }
@@ -226,6 +231,10 @@ impl Hub {
                         Some(Reply::Brightness(laminar_sys::display::brightness()))
                     }
                     Job::Output => Some(Reply::Output(laminar_sys::audio::default_output_name())),
+                    Job::Geocode(city) => {
+                        let r = laminar_sys::weather::geocode(&city);
+                        Some(Reply::Geocode(city, r))
+                    }
                     Job::ApplyWallpaper(p) => {
                         laminar_sys::connectors::apply_wallpaper(&p);
                         None
@@ -271,6 +280,7 @@ impl Hub {
                 Reply::Mic(m) => self.mic_muted = m,
                 Reply::Brightness(b) => self.brightness = b,
                 Reply::Output(n) => self.output_name = n,
+                Reply::Geocode(city, r) => self.geocoded = Some((city, r)),
             }
         }
         changed
@@ -324,6 +334,11 @@ impl Hub {
     pub fn ask_output(&self) {
         self.run(Job::Output);
     }
+    /// Look up a place name for the weather (answer in `geocoded`).
+    pub fn geocode(&self, city: String) {
+        self.run(Job::Geocode(city));
+    }
+
     pub fn apply_wallpaper(&self, path: String) {
         self.run(Job::ApplyWallpaper(path));
     }

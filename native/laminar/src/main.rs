@@ -93,6 +93,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `--widget-sheet out.png [light] [filter]`: render every widget at every size to a PNG.
+    if args.first().map(|a| a == "--widget-sheet").unwrap_or(false) {
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+        let out = args.get(1).cloned().unwrap_or_else(|| "widgets.png".into());
+        let light = args.iter().any(|a| a == "light");
+        let filter = args.iter().skip(2).find(|a| *a != "light").cloned();
+        if let Err(e) = widgets::sheet::run(&out, light, filter.as_deref()) {
+            eprintln!("widget sheet failed: {e:?}");
+        }
+        return Ok(());
+    }
+
     let mut opts = Options::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {

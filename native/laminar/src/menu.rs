@@ -159,7 +159,7 @@ impl Menu {
         let h = (y + pad).ceil();
 
         let radius = 12.0 * s;
-        let panel = ui::panel(c, gfx, backdrop, w, h, radius, theme::surface(0.74), s)?;
+        let panel = ui::panel(c, gfx, backdrop, w, h, radius, theme::surface(0.74), s, 0.42)?;
         let m = panel.margin;
         self.origin = (m, m);
         self.panel_w = w;

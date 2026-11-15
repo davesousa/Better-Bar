@@ -150,7 +150,7 @@ impl StackView {
 
         let root = self.popup.root.clone();
         root.Children()?.RemoveAll()?;
-        let panel = ui::panel(c, gfx, backdrop, w, h, 20.0 * s, theme::surface(0.70), s)?;
+        let panel = ui::panel(c, gfx, backdrop, w, h, 20.0 * s, theme::surface(0.70), s, 0.42)?;
         let m = panel.margin;
         self.margin = m;
         self.panel_size = (w, h);

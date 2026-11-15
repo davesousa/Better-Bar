@@ -12,6 +12,7 @@ pub mod canvas;
 pub mod catalog;
 pub mod hub;
 mod paint;
+pub mod sheet;
 
 use std::collections::HashMap;
 
@@ -23,19 +24,55 @@ use windows::UI::Composition::CompositionDrawingSurface;
 use crate::config::Config;
 use crate::gfx::Gfx;
 use crate::services::ControlState;
-pub use catalog::{Def, TimerKind};
+pub use catalog::{Def, Size, TimerKind};
 pub use hub::Hub;
 
-/// Logical height of a Launchpad widget card (a tall one is twice this plus a gap).
+/// Logical height of a medium Launchpad widget card (a large one is twice this plus a gap).
 pub const CARD_H: f32 = 96.0;
+/// Small cards: half a column wide.
+pub const SMALL_H: f32 = 120.0;
 pub const GAP: f32 = 12.0;
 
-pub fn card_h(def: &Def) -> f32 {
-    if def.tall {
-        CARD_H * 2.0 + GAP
-    } else {
-        CARD_H
+/// Logical size of a card in a column `col_w` wide.
+pub fn card_size(size: Size, col_w: f32) -> (f32, f32) {
+    match size {
+        Size::Small => (((col_w - GAP) / 2.0).floor(), SMALL_H),
+        Size::Medium => (col_w, CARD_H),
+        Size::Large => (col_w, CARD_H * 2.0 + GAP),
     }
+}
+
+/// Where each card goes in a column (logical px): small cards pair up side by side.
+pub fn pack(sizes: &[Size], col_w: f32) -> (Vec<(f32, f32, f32, f32)>, f32) {
+    let mut out = Vec::with_capacity(sizes.len());
+    let mut y = 0.0f32;
+    let mut half: Option<(f32, f32)> = None; // (row top, row height) with a free right half
+    for &sz in sizes {
+        let (w, h) = card_size(sz, col_w);
+        match (sz, half) {
+            (Size::Small, Some((top, rh))) => {
+                out.push((col_w - w, top, w, h));
+                y = top + rh.max(h) + GAP;
+                half = None;
+            }
+            (Size::Small, None) => {
+                out.push((0.0, y, w, h));
+                half = Some((y, h));
+            }
+            (_, open) => {
+                if let Some((top, rh)) = open {
+                    y = top + rh + GAP;
+                    half = None;
+                }
+                out.push((0.0, y, w, h));
+                y += h + GAP;
+            }
+        }
+    }
+    if let Some((top, rh)) = half {
+        y = top + rh + GAP;
+    }
+    (out, y)
 }
 
 /// Local date and time.
@@ -117,6 +154,11 @@ pub struct Ctx<'a> {
     pub names: &'a HashMap<String, String>,
     /// WhatsApp: None = not running, Some(true) = has asked for attention.
     pub whatsapp: Option<bool>,
+    /// Tray icons (key, name) for Background Apps, and the one under the pointer.
+    pub tray: &'a [(u64, String)],
+    pub hover_tray: Option<u64>,
+    /// Windows Update status (None until checked).
+    pub update: Option<&'a laminar_sys::update::UpdateStatus>,
     /// Use made-up data for connectors that aren't set up (gallery previews).
     pub sample: bool,
     pub now: Now,
@@ -129,7 +171,6 @@ pub enum WAct {
     Open(String),
     /// Show the connect form for a connector.
     Connect(&'static str),
-    Launchpad,
     Search,
     Timer(TimerKind),
     TimerReset(TimerKind),
@@ -152,6 +193,14 @@ pub enum WAct {
     File(String),
     Notes,
     WhatsApp,
+    /// Show the Wi-Fi network list.
+    WifiMenu,
+    Snip,
+    Lock,
+    /// The power menu (Restart for updates).
+    Power,
+    /// A tray icon (left click; right click is handled by the host).
+    Tray(u64),
 }
 
 /// Clickable areas (logical px inside the widget) and app icons the host draws on top.
@@ -181,9 +230,15 @@ pub fn render(gfx: &Gfx, surface: &CompositionDrawingSurface, def: &Def, ctx: &C
     Ok(out)
 }
 
-/// Width in the dock for a widget at icon size `b`.
-pub fn dock_width(def: &Def, b: f32) -> f32 {
-    (def.dock_w * b).round()
+/// Width in the dock for a widget of `size` at icon size `b`.
+pub fn dock_width(def: &Def, size: Size, b: f32) -> f32 {
+    let medium = def.dock_w.max(2.2);
+    (match size {
+        Size::Small => 1.0,
+        Size::Medium => medium,
+        Size::Large => (medium * 1.6).max(3.6),
+    } * b)
+        .round()
 }
 
 /// The connectors a widget needs fetched.
@@ -321,4 +376,31 @@ pub fn world_cities(cfg: &Config) -> Vec<(String, String)> {
         ];
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_cards_pair_up() {
+        let (r, h) = pack(&[Size::Small, Size::Small, Size::Medium, Size::Small, Size::Large], 268.0);
+        // Two smalls share the first row, side by side.
+        assert_eq!(r[0].1, r[1].1);
+        assert!(r[1].0 > r[0].0);
+        // The medium starts a new row below them; a lone small then gets its own row.
+        assert!(r[2].1 >= r[0].1 + SMALL_H);
+        assert!(r[3].1 > r[2].1 && r[3].0 == 0.0);
+        assert!(r[4].1 > r[3].1);
+        assert!(h >= r[4].1 + CARD_H * 2.0);
+    }
+
+    #[test]
+    fn every_widget_has_a_unique_id() {
+        let mut ids: Vec<&str> = catalog::all().map(|d| d.id).collect();
+        let n = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), n);
+    }
 }

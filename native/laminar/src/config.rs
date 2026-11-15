@@ -17,8 +17,42 @@ pub const SEPARATOR: &str = "|";
 pub enum Pin {
     Id(String),
     Stack { stack: String, apps: Vec<String> },
-    /// A widget in the dock: `{ "widget": "clock" }` (ids in widgets/catalog.rs).
-    Widget { widget: String },
+    /// A widget in the dock: `{ "widget": "clock" }` or `{ "widget": "clock", "size": "small" }`
+    /// (ids in widgets/catalog.rs).
+    Widget {
+        widget: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<crate::widgets::catalog::Size>,
+    },
+}
+
+/// A widget in a Launchpad column: `"clock"` or `{ "id": "clock", "size": "small" }`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum WRef {
+    Id(String),
+    Sized { id: String, size: crate::widgets::catalog::Size },
+}
+
+impl WRef {
+    pub fn new(id: &str, size: crate::widgets::catalog::Size) -> Self {
+        // Keep the short form when the size is the widget's own default.
+        match crate::widgets::catalog::get(id) {
+            Some(d) if d.size == size => WRef::Id(id.to_string()),
+            _ => WRef::Sized { id: id.to_string(), size },
+        }
+    }
+    pub fn id(&self) -> &str {
+        match self {
+            WRef::Id(s) | WRef::Sized { id: s, .. } => s,
+        }
+    }
+    pub fn size(&self) -> crate::widgets::catalog::Size {
+        match self {
+            WRef::Sized { size, .. } => *size,
+            WRef::Id(id) => crate::widgets::catalog::get(id).map(|d| d.size).unwrap_or_default(),
+        }
+    }
 }
 
 impl Pin {
@@ -93,7 +127,17 @@ pub struct Config {
     pub weather_lat: f32,
     pub weather_lon: f32,
     /// Widgets in Launchpad's left column, top to bottom (ids in widgets/catalog.rs).
-    pub launchpad_widgets: Vec<String>,
+    pub launchpad_widgets: Vec<WRef>,
+    /// Widgets in Launchpad's right column (Control Center), top to bottom.
+    pub right_widgets: Vec<WRef>,
+    /// Always-on widgets (turn off here to remove them).
+    pub show_background_apps: bool,
+    pub show_windows_update: bool,
+    pub show_windows_settings: bool,
+    /// 0–1 strength of the shadow under Launchpad's panels.
+    pub panel_shadow: f32,
+    /// 0–1 strength of the shadow under widgets and tiles.
+    pub card_shadow: f32,
     /// Widget and connector settings that aren't secret, by connector id
     /// (e.g. "github": {"username": "…"}). API keys live in Windows Credential Manager.
     pub widget_settings: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
@@ -135,6 +179,12 @@ impl Default for Config {
             weather_lat: 43.65,
             weather_lon: -79.38,
             launchpad_widgets: crate::widgets::catalog::default_launchpad(),
+            right_widgets: crate::widgets::catalog::default_right(),
+            show_background_apps: true,
+            show_windows_update: true,
+            show_windows_settings: true,
+            panel_shadow: 0.42,
+            card_shadow: 0.35,
             widget_settings: Default::default(),
             pins: Vec::new(),
         }
@@ -179,8 +229,26 @@ impl Config {
         self.reveal_zone = self.reveal_zone.clamp(1.0, 40.0);
         self.extra_blur = self.extra_blur.clamp(0.0, 40.0);
         // Forget widgets this version doesn't know (e.g. after a downgrade).
-        self.launchpad_widgets.retain(|w| crate::widgets::catalog::get(w).is_some());
-        self.pins.retain(|p| !matches!(p, Pin::Widget { widget } if crate::widgets::catalog::get(widget).is_none()));
+        self.launchpad_widgets.retain(|w| crate::widgets::catalog::get(w.id()).is_some());
+        self.right_widgets.retain(|w| crate::widgets::catalog::get(w.id()).is_some());
+        self.pins.retain(|p| !matches!(p, Pin::Widget { widget, .. } if crate::widgets::catalog::get(widget).is_none()));
+        // Always-on widgets: present (in either column) when switched on, gone when off.
+        for (key, id) in crate::widgets::catalog::PINNED {
+            let on = match *key {
+                "show_background_apps" => self.show_background_apps,
+                "show_windows_update" => self.show_windows_update,
+                _ => self.show_windows_settings,
+            };
+            let present = self.launchpad_widgets.iter().chain(self.right_widgets.iter()).any(|w| w.id() == *id);
+            if on && !present {
+                self.right_widgets.push(WRef::Id(id.to_string()));
+            } else if !on {
+                self.launchpad_widgets.retain(|w| w.id() != *id);
+                self.right_widgets.retain(|w| w.id() != *id);
+            }
+        }
+        self.panel_shadow = self.panel_shadow.clamp(0.0, 1.0);
+        self.card_shadow = self.card_shadow.clamp(0.0, 1.0);
         // Pins saved before version-folder handling point into a folder an update deletes.
         // (In memory only: the next save writes the stable path.)
         let fix = |s: &mut String| {
@@ -221,5 +289,35 @@ impl Config {
             || self.pins != o.pins
             || self.auto_hide != o.auto_hide
             || self.per_display_windows != o.per_display_windows
+            || self.card_shadow != o.card_shadow
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::catalog::Size;
+
+    #[test]
+    fn widget_entries_old_and_new() {
+        let c: Config = serde_json::from_str(r#"{"launchpad_widgets": ["clock", {"id": "analog", "size": "large"}], "pins": ["|", {"widget": "clock"}, {"widget": "weather", "size": "small"}]}"#).unwrap();
+        assert_eq!(c.launchpad_widgets[0].size(), Size::Medium);
+        assert_eq!(c.launchpad_widgets[1].size(), Size::Large);
+        assert!(matches!(&c.pins[1], Pin::Widget { widget, size: None } if widget == "clock"));
+        assert!(matches!(&c.pins[2], Pin::Widget { size: Some(Size::Small), .. }));
+    }
+
+    #[test]
+    fn always_on_widgets_follow_their_switches() {
+        let mut c = Config { right_widgets: Vec::new(), ..Config::default() };
+        c = c.sanitized();
+        assert!(c.right_widgets.iter().any(|w| w.id() == "background-apps"));
+        c.show_windows_update = false;
+        c = c.sanitized();
+        assert!(!c.right_widgets.iter().any(|w| w.id() == "windows-update"));
+        // A widget id this version doesn't know is dropped instead of breaking the column.
+        c.launchpad_widgets.push(WRef::Id("no-such-widget".into()));
+        c = c.sanitized();
+        assert!(!c.launchpad_widgets.iter().any(|w| w.id() == "no-such-widget"));
     }
 }

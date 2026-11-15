@@ -258,6 +258,16 @@ impl Gfx {
             let (w, h) = (w.ceil().max(1.0) + 2.0, m.height.ceil() + 2.0);
             let surface = self.surface(w, h)?;
             let (r, g, b, a) = st.color;
+            // Icons: shift so the glyph's ink is centred in the surface (callers centre the
+            // surface on the spot the icon belongs).
+            let ink_shift = if st.icons {
+                let o = layout.GetOverhangMetrics()?;
+                let (lw, lh) = (max_w, 2000.0);
+                let (il, ir, it, ib) = (-o.left, lw + o.right, -o.top, lh + o.bottom);
+                (w / 2.0 - (il + ir) / 2.0 - 1.0, h / 2.0 - (it + ib) / 2.0 - 1.0)
+            } else {
+                (0.0, 0.0)
+            };
             self.draw(&surface, |dc| {
                 let brush = dc.CreateSolidColorBrush(&color(r, g, b, a), None)?;
                 dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -265,7 +275,7 @@ impl Gfx {
                     // Centre within the surface width.
                     layout.SetMaxWidth(w - 2.0)?;
                 }
-                dc.DrawTextLayout(pt(1.0, 1.0), &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                dc.DrawTextLayout(pt(1.0 + ink_shift.0, 1.0 + ink_shift.1), &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
                 Ok(())
             })?;
             Ok((surface, w, h))

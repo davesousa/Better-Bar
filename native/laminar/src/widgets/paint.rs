@@ -1,10 +1,17 @@
-//! How each widget face draws. All coordinates are logical pixels inside the widget.
-//! `dense` is the compact version for the dock (one icon tall).
+//! How each widget face draws, at every size. Coordinates are logical pixels inside the
+//! widget. Five shapes:
+//!   Mini   — the dock at one icon wide: one visual and a short value
+//!   Dock   — the dock, wider: visual, value and caption side by side
+//!   Small  — half a Launchpad column
+//!   Medium — a full column, one row tall (the reference layout)
+//!   Large  — a full column, two rows tall: the medium layout plus details
+//! Most faces describe themselves once as a `Sum` (visual, value, caption, chart, meter)
+//! and share the Mini/Dock/Small layouts; faces with their own look draw every shape.
 
 use std::borrow::Cow;
 
 use laminar_sys::feed::{Feed, FeedError};
-use windows::Win32::Graphics::Imaging::IWICBitmapSource;
+use windows::Win32::Graphics::Imaging::{IWICBitmapSource, IWICImagingFactory};
 
 use super::canvas::{alpha, hex, Align, Badge, Canvas, Col, Font};
 use super::catalog::*;
@@ -16,6 +23,8 @@ const RED: Col = hex(0xFF453A);
 const ORANGE: Col = hex(0xFF9F0A);
 const PURPLE: Col = hex(0xBF5AF2);
 const YELLOW: Col = hex(0xFFD60A);
+const CLAUDE: Col = hex(0xD97757);
+const WHITE: Col = (1.0, 1.0, 1.0, 1.0);
 
 // Segoe Fluent Icons
 const G_PLAY: &str = "\u{E768}";
@@ -42,6 +51,45 @@ const G_KEYBOARD: &str = "\u{E765}";
 const G_MUSIC: &str = "\u{E8D6}";
 const G_CLOCK: &str = "\u{E823}";
 const G_PLUG: &str = "\u{E83E}";
+const G_COFFEE: &str = "\u{EC32}";
+const G_DND: &str = "\u{E7ED}";
+const G_SETTINGS: &str = "\u{E713}";
+const G_UPDATE: &str = "\u{E895}";
+const G_SNIP: &str = "\u{E7C5}";
+const G_LOCK: &str = "\u{E72E}";
+const G_CHEV: &str = "\u{E76C}";
+const G_DRIVE: &str = "\u{EDA2}";
+const G_CAL: &str = "\u{E787}";
+const G_SCREEN: &str = "\u{E7F4}";
+const G_IMAGE: &str = "\u{E91B}";
+const G_AI: &str = "\u{E99A}";
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shape {
+    Mini,
+    Dock,
+    Small,
+    Medium,
+    Large,
+}
+
+fn shape_of(c: &Canvas, dense: bool) -> Shape {
+    if dense {
+        if c.w < c.h * 1.5 {
+            Shape::Mini
+        } else {
+            Shape::Dock
+        }
+    } else if c.w < 180.0 {
+        Shape::Small
+    } else if c.h > 150.0 {
+        Shape::Large
+    } else {
+        Shape::Medium
+    }
+}
+
+// ------------------------------------------------------------------ shared pieces
 
 /// Data for a connector face: its feed, or why there isn't one.
 enum Got<'a> {
@@ -53,19 +101,17 @@ enum Got<'a> {
 
 fn got<'a>(x: &'a Ctx, conn: &str) -> Got<'a> {
     match (x.hub.feed(conn), x.hub.err(conn)) {
-        (Some(f), _) if !x.sample || x.hub.err(conn).is_none() => Got::Feed(Cow::Borrowed(f)),
+        (Some(f), None) => Got::Feed(Cow::Borrowed(f)),
         _ if x.sample => Got::Feed(Cow::Owned(super::hub::sample(conn))),
-        (_, Some(FeedError::NeedsSetup(m))) => Got::Setup(m.clone()),
-        (_, Some(FeedError::Unauthorized(m))) => Got::Setup(m.clone()),
+        (_, Some(FeedError::NeedsSetup(m))) | (_, Some(FeedError::Unauthorized(m))) => Got::Setup(m.clone()),
+        (Some(f), Some(_)) => Got::Feed(Cow::Borrowed(f)),
         (None, Some(FeedError::Failed(m))) => Got::Error(m.clone()),
-        (Some(f), _) => Got::Feed(Cow::Borrowed(f)),
         (None, None) => Got::Loading,
     }
 }
 
 fn bg(c: &Canvas, dense: bool) {
-    let r = if dense { 12.0 } else { 18.0 };
-    c.rr(0.0, 0.0, c.w, c.h, r, c.card());
+    c.rr(0.0, 0.0, c.w, c.h, if dense { 12.0 } else { 18.0 }, c.card());
 }
 
 fn up_down(d: f64) -> Col {
@@ -80,63 +126,13 @@ fn delta_str(d: f64) -> String {
     format!("{}{:.1}%", if d >= 0.0 { "▲ " } else { "▼ " }, d.abs())
 }
 
-/// The whole-card fallback states for connector faces.
-fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &'static str, g: &Got, dense: bool) -> bool {
-    let (title, sub, connect) = match g {
-        Got::Feed(_) => return false,
-        Got::Loading => (name.to_string(), "Loading…".to_string(), false),
-        Got::Setup(m) => (name.to_string(), m.clone(), true),
-        Got::Error(m) => (name.to_string(), m.clone(), false),
-    };
-    if dense {
-        let s = c.h * 0.56;
-        c.badge(badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-        let x = c.h;
-        c.tw(&title, x, c.h * 0.2, (c.h * 0.24).max(10.0), 600, c.text1(), c.w - x - 6.0);
-        c.tw(if connect { "Click to connect" } else { &sub }, x, c.h * 0.54, (c.h * 0.2).max(9.5), 400, c.text2(), c.w - x - 6.0);
-    } else {
-        c.badge(badge, 16.0, 16.0, 34.0);
-        c.tw(&title, 62.0, 18.0, 14.0, 600, c.text1(), c.w - 78.0);
-        c.tw(&sub, 62.0, 38.0, 11.5, 400, c.text2(), c.w - 78.0);
-        if connect {
-            let (bw, bh) = (86.0, 26.0);
-            let (bx, by) = (c.w - bw - 14.0, c.h - bh - 12.0);
-            c.rr(bx, by, bw, bh, bh / 2.0, BLUE);
-            c.tc("Connect", bx + bw / 2.0, by + 5.0, 12.0, 600, (1.0, 1.0, 1.0, 1.0), bw);
-        }
+/// The largest size (from `start` down to `min`) at which `s` fits in `max_w`.
+fn fit(c: &Canvas, s: &str, start: f32, min: f32, weight: u32, font: Font, max_w: f32) -> f32 {
+    let w = c.measure(s, start, weight, font).0;
+    if w <= max_w || w <= 0.0 {
+        return start;
     }
-    if connect {
-        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect(conn)));
-    }
-    true
-}
-
-pub fn paint(c: &Canvas, def: &Def, x: &Ctx, dense: bool, wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory) -> Painted {
-    let mut out = Painted::default();
-    let custom_bg = matches!(def.face, Face::Weather(WeatherKind::Banner) | Face::Wallpaper | Face::Clock(ClockKind::DayPage) | Face::Media(MediaKind::Disc));
-    if !custom_bg || dense {
-        bg(c, dense);
-    }
-    match def.face {
-        Face::Stat { conn, badge, open } => stat(c, &mut out, def, x, conn, &badge, open, dense),
-        Face::Chart { conn, badge, open } => chart(c, &mut out, def, x, conn, &badge, open, dense),
-        Face::Usage { conn, badge, open } => usage(c, &mut out, def, x, conn, &badge, open, dense),
-        Face::Heat { conn, badge, color, open } => heat(c, &mut out, def, x, conn, &badge, hex(color), open, dense),
-        Face::List { conn, badge, open } => list(c, &mut out, def, x, conn, &badge, open, dense),
-        Face::Watch { conn } => watch(c, &mut out, def, x, conn, dense),
-        Face::Next => next_event(c, &mut out, def, x, dense),
-        Face::AiAll => ai_all(c, &mut out, x, dense),
-        Face::Goal => goal(c, &mut out, x, dense),
-        Face::Wallpaper => wallpaper(c, &mut out, def, x, wic, dense),
-        Face::Clock(k) => clock(c, &mut out, k, x, dense),
-        Face::Weather(k) => weather(c, &mut out, k, x, dense),
-        Face::Timer(k) => timer(c, &mut out, k, x, dense),
-        Face::Media(k) => media(c, &mut out, k, x, wic, dense),
-        Face::Sys(k) => sys(c, &mut out, k, x, dense),
-        Face::Tool(k) => tool(c, &mut out, k, x, dense),
-        Face::Progress(s) => progress(c, s, x, dense),
-    }
-    out
+    (start * max_w / w).max(min)
 }
 
 fn open_hit(out: &mut Painted, c: &Canvas, open: &str) {
@@ -145,21 +141,216 @@ fn open_hit(out: &mut Painted, c: &Canvas, open: &str) {
     }
 }
 
-/// Compact layout used by most dock widgets: a visual on the left, value and caption.
-fn dense_face(c: &Canvas, value: &str, caption: &str, value_col: Col) -> f32 {
-    let x = c.h * 0.98;
-    let vs = (c.h * 0.36).max(13.0);
-    c.text(value, x, c.h * 0.14, vs, 600, value_col, Align::Left, c.w - x - 6.0, Font::Display);
-    c.tw(caption, x, c.h * 0.14 + vs * 1.28, (c.h * 0.19).max(9.5), 400, c.text2(), c.w - x - 6.0);
-    x
+/// What a face shows at a glance.
+enum Vis {
+    Badge(Badge),
+    /// Progress ring: fraction, colour, text inside (may be empty).
+    Ring(f32, Col, String),
+    Glyph(&'static str, Col),
+    Emoji(&'static str),
+}
+
+struct Sum {
+    vis: Vis,
+    value: String,
+    caption: String,
+    delta: Option<f64>,
+    series: Vec<f64>,
+    meter: Option<(f32, Col)>,
+}
+
+impl Sum {
+    fn new(vis: Vis, value: impl Into<String>, caption: impl Into<String>) -> Self {
+        Sum { vis, value: value.into(), caption: caption.into(), delta: None, series: Vec::new(), meter: None }
+    }
+}
+
+fn draw_vis(c: &Canvas, v: &Vis, x: f32, y: f32, size: f32) {
+    match v {
+        Vis::Badge(b) => c.badge(b, x, y, size),
+        Vis::Ring(f, col, t) => {
+            let r = size / 2.0;
+            let th = (size * 0.12).max(3.0);
+            c.ring(x + r, y + r, r - th / 2.0, th, *f, *col);
+            if !t.is_empty() {
+                let fs = fit(c, t, size * 0.27, 7.0, 600, Font::Text, size - 2.0 * th - 4.0);
+                c.text(t, x + r, y + r - fs * 0.68, fs, 600, c.text1(), Align::Center, size, Font::Text);
+            }
+        }
+        Vis::Glyph(g, col) => {
+            c.rr(x, y, size, size, size * 0.28, c.ink(0.10));
+            c.glyph(g, x + size / 2.0, y + size / 2.0, size * 0.48, *col);
+        }
+        Vis::Emoji(e) => {
+            c.text(e, x + size / 2.0, y + size * 0.02, size * 0.8, 400, c.text1(), Align::Center, size * 1.4, Font::Text);
+        }
+    }
+}
+
+/// Mini, Dock and Small layouts shared by most faces.
+fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
+    let vcol = c.text1();
+    match sh {
+        Shape::Mini => {
+            if s.value.is_empty() {
+                let v = c.h * 0.62;
+                draw_vis(c, &s.vis, (c.w - v) / 2.0, (c.h - v) / 2.0, v);
+                return;
+            }
+            let v = (c.h * 0.46).round();
+            draw_vis(c, &s.vis, (c.w - v) / 2.0, c.h * 0.08, v);
+            let fs = fit(c, &s.value, c.h * 0.24, 8.0, 700, Font::Display, c.w - 6.0);
+            let y = c.h * 0.08 + v + 1.0;
+            c.text(&s.value, c.w / 2.0, y, fs, 700, vcol, Align::Center, c.w - 4.0, Font::Display);
+        }
+        Shape::Dock => {
+            let v = (c.h * 0.56).round();
+            draw_vis(c, &s.vis, (c.h - v) / 2.0, (c.h - v) / 2.0, v);
+            let x0 = c.h * 0.96;
+            let spark = s.series.len() > 2 && c.w > c.h * 3.4;
+            let right = if spark { c.w - c.w * 0.3 - 8.0 } else { c.w - 8.0 };
+            let vs = fit(c, &s.value, (c.h * 0.34).max(13.0), 10.0, 600, Font::Display, right - x0);
+            let cs = (c.h * 0.19).max(9.5);
+            let block = vs * 1.25 + cs * 1.3;
+            let top = (c.h - block) / 2.0 - 1.0;
+            c.text(&s.value, x0, top, vs, 600, vcol, Align::Left, right - x0, Font::Display);
+            match s.delta {
+                Some(d) if c.w > c.h * 2.6 => {
+                    let cw = c.tw(&s.caption, x0, top + vs * 1.25, cs, 400, c.text2(), (right - x0) * 0.55);
+                    c.tw(&delta_str(d), x0 + cw + 5.0, top + vs * 1.25, cs, 600, up_down(d), right - x0 - cw - 5.0);
+                }
+                _ => {
+                    c.tw(&s.caption, x0, top + vs * 1.25, cs, 400, c.text2(), right - x0);
+                }
+            }
+            if let Some((f, col)) = s.meter.filter(|_| !spark) {
+                c.bar(x0, c.h - (c.h * 0.16).max(7.0), right - x0, (c.h * 0.07).max(3.0), f, col);
+            }
+            if spark {
+                let col = s.delta.map(up_down).unwrap_or(GREEN);
+                c.area(c.w - c.w * 0.3, c.h * 0.22, c.w * 0.3 - 10.0, c.h * 0.56, &s.series, col, true);
+            }
+        }
+        _ => {
+            // Small card.
+            let pad = 14.0;
+            let v = 30.0;
+            draw_vis(c, &s.vis, pad, pad, v);
+            if let Some(d) = s.delta {
+                c.tr(&delta_str(d), c.w - pad, pad + 2.0, 10.5, 600, up_down(d));
+            }
+            let vs = fit(c, &s.value, 24.0, 12.0, 600, Font::Display, c.w - 2.0 * pad);
+            let vy = pad + v + 8.0;
+            c.text(&s.value, pad, vy, vs, 600, vcol, Align::Left, c.w - 2.0 * pad, Font::Display);
+            c.tw(&s.caption, pad, vy + vs * 1.28, 11.0, 400, c.text2(), c.w - 2.0 * pad);
+            if s.series.len() > 2 {
+                let col = s.delta.map(up_down).unwrap_or(GREEN);
+                c.area(pad, c.h - 24.0, c.w - 2.0 * pad, 14.0, &s.series, col, true);
+            } else if let Some((f, col)) = s.meter {
+                c.bar(pad, c.h - 16.0, c.w - 2.0 * pad, 5.0, f, col);
+            }
+        }
+    }
+}
+
+/// Large cards: details under the medium layout (a chart, else rows).
+fn details(c: &Canvas, f: &Feed, top: f32, col: Col) {
+    let pad = 14.0;
+    if f.series.len() > 2 {
+        c.line(pad, top - 6.0, c.w - pad, top - 6.0, 1.0, c.ink(0.08));
+        c.area(pad, top + 6.0, c.w - 2.0 * pad, c.h - top - 18.0, &f.series, col, true);
+        return;
+    }
+    let rows: Vec<_> = f.rows.iter().take(((c.h - top - 10.0) / 24.0) as usize).collect();
+    if rows.is_empty() {
+        return;
+    }
+    c.line(pad, top - 6.0, c.w - pad, top - 6.0, 1.0, c.ink(0.08));
+    for (k, r) in rows.iter().enumerate() {
+        let y = top + 4.0 + k as f32 * 24.0;
+        let vw = c.measure(&r.value, 11.5, 500, Font::Text).0.min(c.w * 0.45);
+        c.tw(&r.label, pad, y, 12.0, 400, c.text1(), c.w - 2.0 * pad - vw - 8.0);
+        c.tr(&r.value, c.w - pad, y, 11.5, 500, c.text2());
+    }
+}
+
+/// The whole-card fallback for connector faces that have no data.
+fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &'static str, g: &Got, sh: Shape) -> bool {
+    let (sub, connect) = match g {
+        Got::Feed(_) => return false,
+        Got::Loading => ("Loading…".to_string(), false),
+        Got::Setup(m) => (m.clone(), true),
+        Got::Error(m) => (m.clone(), false),
+    };
+    if connect {
+        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect(conn)));
+    }
+    match sh {
+        Shape::Mini => compact_sum(c, &Sum::new(Vis::Badge(*badge), if connect { "Connect" } else { "" }, ""), sh),
+        Shape::Dock => compact_sum(c, &Sum::new(Vis::Badge(*badge), name, if connect { "Click to connect".to_string() } else { sub }), sh),
+        Shape::Small => {
+            c.badge(badge, 14.0, 14.0, 30.0);
+            c.tw(name, 14.0, 54.0, 13.0, 600, c.text1(), c.w - 28.0);
+            c.text(&sub, 14.0, 74.0, 10.5, 400, c.text2(), Align::Left, c.w - 28.0, Font::Text);
+            if connect {
+                c.rr(14.0, c.h - 34.0, c.w - 28.0, 24.0, 12.0, BLUE);
+                c.tc("Connect", c.w / 2.0, c.h - 30.0, 11.5, 600, WHITE, c.w - 28.0);
+            }
+        }
+        _ => {
+            c.badge(badge, 16.0, 16.0, 34.0);
+            c.tw(name, 62.0, 18.0, 14.0, 600, c.text1(), c.w - 78.0);
+            c.tw(&sub, 62.0, 38.0, 11.5, 400, c.text2(), c.w - 78.0);
+            if connect {
+                let (bw, bh) = (86.0, 26.0);
+                let (bx, by) = (c.w - bw - 14.0, c.h - bh - 12.0);
+                c.rr(bx, by, bw, bh, bh / 2.0, BLUE);
+                c.tc("Connect", bx + bw / 2.0, by + 5.0, 12.0, 600, WHITE, bw);
+            }
+        }
+    }
+    true
+}
+
+pub fn paint(c: &Canvas, def: &Def, x: &Ctx, dense: bool, wic: &IWICImagingFactory) -> Painted {
+    let mut out = Painted::default();
+    let sh = shape_of(c, dense);
+    let custom_bg = matches!(def.face, Face::Weather(WeatherKind::Banner) | Face::Wallpaper | Face::Clock(ClockKind::DayPage | ClockKind::AnalogSquare) | Face::Media(MediaKind::Disc));
+    if !custom_bg || dense {
+        bg(c, dense);
+    }
+    match def.face {
+        Face::Stat { conn, badge, open } => stat(c, &mut out, def, x, conn, &badge, open, sh),
+        Face::Chart { conn, badge, open } => chart(c, &mut out, def, x, conn, &badge, open, sh),
+        Face::Usage { conn, badge, open } => usage(c, &mut out, def, x, conn, &badge, open, sh),
+        Face::Heat { conn, badge, color, open } => heat(c, &mut out, def, x, conn, &badge, hex(color), open, sh),
+        Face::List { conn, badge, open } => list(c, &mut out, def, x, conn, &badge, open, sh),
+        Face::Watch { conn } => watch(c, &mut out, def, x, conn, sh),
+        Face::Next => next_event(c, &mut out, def, x, sh),
+        Face::AiAll => ai_all(c, &mut out, x, sh),
+        Face::Goal => goal(c, &mut out, x, sh),
+        Face::Wallpaper => wallpaper(c, &mut out, def, x, wic, sh),
+        Face::Clock(k) => clock(c, &mut out, k, x, sh),
+        Face::Weather(k) => weather(c, &mut out, k, x, sh),
+        Face::Timer(k) => timer(c, &mut out, k, x, sh),
+        Face::Media(k) => media(c, &mut out, k, x, wic, sh),
+        Face::Sys(k) => sys(c, &mut out, k, x, sh),
+        Face::Tool(k) => tool(c, &mut out, k, x, sh),
+        Face::Progress(s) => progress(c, s, x, sh),
+    }
+    out
+}
+
+fn compactish(sh: Shape) -> bool {
+    matches!(sh, Shape::Mini | Shape::Dock | Shape::Small)
 }
 
 // ------------------------------------------------------------------ connector faces
 
 #[allow(clippy::too_many_arguments)]
-fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, dense: bool) {
+fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, dense) {
+    if placeholder(c, out, def.name, badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -167,37 +358,39 @@ fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     let (value, caption) = if def.id == "github-streak" {
         (f.extra.get("streak").cloned().unwrap_or_else(|| "0".into()), "Day streak".to_string())
     } else {
-        let cap = if f.caption.is_empty() { def.name.to_string() } else { f.caption.clone() };
-        (headline(&f), cap)
+        (headline(&f), if f.caption.is_empty() { def.name.to_string() } else { f.caption.clone() })
     };
-    if dense {
-        let s = c.h * 0.56;
-        c.badge(badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-        dense_face(c, &value, &caption, c.text1());
+    if compactish(sh) {
+        let mut s = Sum::new(Vis::Badge(*badge), value, caption);
+        s.delta = f.delta_pct;
+        s.series = f.series.clone();
+        compact_sum(c, &s, sh);
         return;
     }
     c.badge(badge, c.w - 16.0 - 34.0, 16.0, 34.0);
-    c.num(&value, 16.0, 14.0, 32.0, 600, c.text1());
+    c.num(&value, 16.0, 14.0, fit(c, &value, 32.0, 18.0, 600, Font::Display, c.w - 80.0), 600, c.text1());
     let cw = c.tw(&caption, 16.0, 58.0, 12.0, 400, c.text2(), c.w - 120.0);
     if let Some(d) = f.delta_pct {
         c.tw(&delta_str(d), 22.0 + cw, 58.0, 11.5, 600, up_down(d), 90.0);
     }
     if let Some(n) = f.extra.get("active_subscriptions") {
         c.tr(&format!("{n} subscribers"), c.w - 16.0, 70.0, 11.0, 400, c.text3());
-    } else if def.name.contains("Mail") {
+    } else if conn == "gmail" {
         if let Some(r) = f.rows.first() {
             c.tw(&r.label, 16.0, 74.0, 11.0, 400, c.text3(), c.w - 32.0);
         }
     }
-    if f.series.len() > 2 {
+    if sh == Shape::Large {
+        details(c, &f, 100.0, f.delta_pct.map(up_down).unwrap_or(GREEN));
+    } else if f.series.len() > 2 {
         c.area(c.w - 120.0, 64.0, 104.0, 20.0, &f.series, GREEN, false);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, dense: bool) {
+fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, dense) {
+    if placeholder(c, out, def.name, badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -208,15 +401,14 @@ fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
     };
     let title = match f.extra.get("symbol") {
         Some(s) => s.clone(),
-        None if !f.caption.is_empty() && def.id.contains("chart") => def.name.trim_end_matches(" Chart").to_string(),
-        None => def.name.to_string(),
+        None => def.name.trim_end_matches(" Chart").to_string(),
     };
-    let value = headline(&f);
-    if dense {
-        let s = c.h * 0.5;
-        c.badge(badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-        let tx = dense_face(c, &value, &title, c.text1());
-        let _ = tx;
+    let value = if f.unit == "tokens" { compact(f.value.unwrap_or(0.0)) } else { headline(&f) };
+    if compactish(sh) {
+        let mut s = Sum::new(Vis::Badge(*badge), value, title);
+        s.delta = f.delta_pct;
+        s.series = f.series.clone();
+        compact_sum(c, &s, sh);
         return;
     }
     c.badge(badge, 14.0, 13.0, 20.0);
@@ -238,49 +430,51 @@ fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn usage(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, dense: bool) {
+fn usage(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, dense) {
+    if placeholder(c, out, def.name, badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
     open_hit(out, c, open);
     let tokens = f.unit == "tokens";
-    let value = if tokens { format!("{} tokens", compact(f.value.unwrap_or(0.0))) } else { headline(&f) };
+    let short = if tokens { compact(f.value.unwrap_or(0.0)) } else { headline(&f) };
     let (meter_label, frac) = if tokens {
         let w5 = f.extra.get("tokens_5h").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let wk = f.extra.get("tokens_week").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        // Share of the week's use that happened in the last 5 hours (a sense of "pace").
+        // Share of the week's use in the last 5 hours (a sense of pace).
         (format!("5h window {} · week {}", compact(w5), compact(wk)), if wk > 0.0 { (w5 / wk) as f32 } else { 0.0 })
     } else {
         let lim = f.extra.get("total_credits").cloned().unwrap_or_default();
-        (if lim.is_empty() { f.caption.clone() } else { format!("{} of ${lim} used", (f.frac.unwrap_or(0.0) * 100.0).round() as i32).replace(" of", "% of") }, f.frac.unwrap_or(0.0))
+        (if lim.is_empty() { f.caption.clone() } else { format!("{}% of ${lim} used", (f.frac.unwrap_or(0.0) * 100.0).round() as i32) }, f.frac.unwrap_or(0.0))
     };
-    if dense {
-        let s = c.h * 0.56;
-        c.badge(badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-        let tx = c.h * 0.98;
-        let vs = (c.h * 0.3).max(12.0);
-        c.text(&if tokens { compact(f.value.unwrap_or(0.0)) } else { headline(&f) }, tx, c.h * 0.16, vs, 600, c.text1(), Align::Left, c.w - tx - 6.0, Font::Display);
-        c.bar(tx, c.h * 0.66, c.w - tx - 10.0, (c.h * 0.1).max(4.0), frac, hex(0xD97757));
+    if compactish(sh) {
+        let mut s = Sum::new(Vis::Badge(*badge), short, if tokens { "tokens today".to_string() } else { f.caption.clone() });
+        s.meter = Some((frac, CLAUDE));
+        if sh == Shape::Small && f.series.len() > 2 {
+            s.series = f.series.clone();
+        }
+        compact_sum(c, &s, sh);
         return;
     }
+    let value = if tokens { format!("{short} tokens") } else { short };
     c.badge(badge, 16.0, 16.0, 36.0);
     c.tw(def.name, 64.0, 15.0, 12.5, 600, c.text2(), c.w - 80.0);
     c.num(&value, 64.0, 32.0, 19.0, 600, c.text1());
-    c.bar(16.0, 70.0, c.w - 32.0, 6.0, frac, hex(0xD97757));
+    c.bar(16.0, 70.0, c.w - 32.0, 6.0, frac, CLAUDE);
     c.tw(&meter_label, 16.0, 78.0, 10.0, 400, c.text3(), c.w - 32.0);
-    if tokens {
-        if let Some(cost) = f.extra.get("cost_today_usd").and_then(|v| v.parse::<f64>().ok()) {
-            c.tr(&format!("≈ {}", money(cost, None)), c.w - 16.0, 20.0, 11.0, 400, c.text3());
-        }
+    if let Some(cost) = f.extra.get("cost_today_usd").and_then(|v| v.parse::<f64>().ok()) {
+        c.tr(&format!("≈ {}", money(cost, None)), c.w - 16.0, 20.0, 11.0, 400, c.text3());
+    }
+    if sh == Shape::Large {
+        details(c, &f, 104.0, CLAUDE);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn heat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, color: Col, open: &str, dense: bool) {
+fn heat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, color: Col, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, dense) {
+    if placeholder(c, out, def.name, badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -290,14 +484,32 @@ fn heat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
         _ => open.to_string(),
     };
     open_hit(out, c, &open);
-    let (gx, gy, gw, gh) = if dense { (6.0, 6.0, c.w - 12.0, c.h - 12.0) } else { (14.0, 40.0, c.w - 28.0, c.h - 50.0) };
-    if !dense {
-        c.badge(badge, 14.0, 12.0, 20.0);
-        c.tw(def.name, 42.0, 14.0, 12.5, 600, c.text1(), c.w - 150.0);
-        let streak = f.extra.get("streak").map(|s| format!("{s}-day streak")).unwrap_or_default();
-        c.tr(&format!("{}  {}", headline(&f), streak), c.w - 14.0, 15.0, 11.5, 500, c.text2());
+    let streak = f.extra.get("streak").cloned();
+    if sh == Shape::Mini {
+        let s = Sum::new(Vis::Badge(*badge), streak.map(|s| format!("{s}d")).unwrap_or_else(|| headline(&f)), "");
+        compact_sum(c, &s, sh);
+        return;
     }
-    let cell_gap = if dense { 1.5 } else { 2.5 };
+    let (gx, gy, gw, gh) = match sh {
+        Shape::Dock => (8.0, 7.0, c.w - 16.0, c.h - 14.0),
+        Shape::Small => {
+            c.badge(badge, 12.0, 12.0, 18.0);
+            c.tw(&headline(&f), 36.0, 12.0, 12.5, 600, c.text1(), c.w - 48.0);
+            if let Some(s) = &streak {
+                c.tw(&format!("{s}-day streak"), 12.0, c.h - 22.0, 10.5, 400, c.text2(), c.w - 24.0);
+            }
+            (12.0, 38.0, c.w - 24.0, c.h - 66.0)
+        }
+        _ => {
+            c.badge(badge, 14.0, 12.0, 20.0);
+            c.tw(def.name, 42.0, 14.0, 12.5, 600, c.text1(), c.w - 150.0);
+            let st = streak.as_ref().map(|s| format!("{s}-day streak")).unwrap_or_default();
+            c.tr(&format!("{}  {}", headline(&f), st), c.w - 14.0, 15.0, 11.5, 500, c.text2());
+            let gh = if sh == Shape::Large { 100.0 } else { c.h - 50.0 };
+            (14.0, 40.0, c.w - 28.0, gh)
+        }
+    };
+    let cell_gap = if sh == Shape::Dock { 1.5 } else { 2.5 };
     let cell = ((gh - 6.0 * cell_gap) / 7.0).max(2.0);
     let cols = (((gw + cell_gap) / (cell + cell_gap)).floor() as usize).max(1);
     let n = f.grid.len();
@@ -305,93 +517,111 @@ fn heat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     // The last column ends today; earlier days fill backwards.
     for col in 0..cols {
         for row in 0..7 {
-            let back = (cols - 1 - col) * 7 + today_row;
             if row > today_row && col == cols - 1 {
                 continue;
             }
-            let k = back as isize - row as isize;
-            let idx = n as isize - 1 - k;
-            let v = if idx >= 0 { f.grid[idx as usize] } else { 0.0 };
+            let back = (cols - 1 - col) * 7 + today_row;
+            let idx = n as isize - 1 - (back as isize - row as isize);
+            let v = if idx >= 0 && (idx as usize) < n { f.grid[idx as usize] } else { 0.0 };
             let fill = if v <= 0.0 { c.ink(0.08) } else { alpha(color, 0.3 + 0.7 * v) };
             c.rr(gx + col as f32 * (cell + cell_gap), gy + row as f32 * (cell + cell_gap), cell, cell, cell * 0.25, fill);
+        }
+    }
+    if sh == Shape::Large {
+        // Totals under the graph.
+        let y = gy + gh + 14.0;
+        let rows: Vec<_> = f.rows.iter().take(4).collect();
+        let slot = (c.w - 28.0) / rows.len().max(1) as f32;
+        for (k, r) in rows.iter().enumerate() {
+            let cx = 14.0 + slot * k as f32;
+            c.num(&r.value, cx, y, 18.0, 600, c.text1());
+            c.tw(&r.label, cx, y + 24.0, 10.5, 400, c.text2(), slot - 6.0);
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn list(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, dense: bool) {
+fn list(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, dense) {
+    if placeholder(c, out, def.name, badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
     open_hit(out, c, open);
     let value = if conn == "calendar" { format!("{} today", f.value.unwrap_or(0.0)) } else { headline(&f) };
-    if dense {
-        let s = c.h * 0.56;
-        c.badge(badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
+    if matches!(sh, Shape::Mini | Shape::Dock) {
         let first = f.rows.first().map(|r| r.label.clone()).unwrap_or_default();
-        dense_face(c, &value, &first, c.text1());
+        compact_sum(c, &Sum::new(Vis::Badge(*badge), value, first), sh);
         return;
     }
-    c.badge(badge, 14.0, 12.0, 22.0);
-    c.tw(def.name, 44.0, 15.0, 12.5, 600, c.text1(), c.w - 140.0);
-    c.tr(&value, c.w - 14.0, 15.0, 12.0, 500, c.text2());
+    let small = sh == Shape::Small;
+    let pad = if small { 12.0 } else { 14.0 };
+    c.badge(badge, pad, 12.0, 22.0);
+    if small {
+        c.tr(&value, c.w - pad, 15.0, 11.5, 600, c.text2());
+    } else {
+        c.tw(def.name, 44.0, 15.0, 12.5, 600, c.text1(), c.w - 140.0);
+        c.tr(&value, c.w - pad, 15.0, 12.0, 500, c.text2());
+    }
     let top = 44.0;
-    let rows: Vec<_> = f.rows.iter().take(if def.tall { 6 } else { 3 }).collect();
+    let rh = if c.h > 150.0 { 26.0 } else if small { 22.0 } else { 17.0 };
+    let n = (((c.h - top - 6.0) / rh).floor() as usize).max(1);
+    let rows: Vec<_> = f.rows.iter().take(n).collect();
     if rows.is_empty() {
-        c.tw("Nothing to show", 14.0, top + 4.0, 11.5, 400, c.text3(), c.w - 28.0);
+        c.tw("Nothing to show", pad, top + 4.0, 11.5, 400, c.text3(), c.w - 2.0 * pad);
         return;
     }
-    let rh = ((c.h - top - 8.0) / rows.len().max(1) as f32).min(28.0);
     for (k, r) in rows.iter().enumerate() {
         let y = top + k as f32 * rh;
-        let vw = c.measure(&r.value, 11.5, 500, Font::Text).0.min(c.w * 0.45);
-        c.tw(&r.label, 14.0, y, 12.0, 400, c.text1(), c.w - 40.0 - vw);
-        c.tr(&r.value, c.w - 14.0, y, 11.5, 500, c.text2());
-        if let Some(fr) = r.frac.filter(|v| *v > 0.0) {
-            c.bar(14.0, y + 17.0, c.w - 28.0, 3.0, fr, if conn == "top_memory" { PURPLE } else { BLUE });
+        let vmax = if small { (c.w - 2.0 * pad) * 0.4 } else { c.w * 0.45 };
+        let vw = c.measure(&r.value, 11.0, 500, Font::Text).0.min(vmax);
+        c.tw(&r.label, pad, y, 11.5, 400, c.text1(), c.w - 2.0 * pad - vw - 6.0);
+        c.text(&r.value, c.w - pad, y, 11.0, 500, c.text2(), Align::Right, vmax, Font::Text);
+        if let Some(fr) = r.frac.filter(|v| *v > 0.0 && rh >= 22.0) {
+            c.bar(pad, y + 16.0, c.w - 2.0 * pad, 3.0, fr, if conn == "top_memory" { PURPLE } else { BLUE });
         }
         if conn == "recent_files" && !r.value.is_empty() {
-            out.hits.push(((8.0, y - 3.0, c.w - 16.0, rh), WAct::File(r.value.clone())));
+            out.hits.push(((6.0, y - 3.0, c.w - 12.0, rh), WAct::File(r.value.clone())));
         }
     }
 }
 
-fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, dense: bool) {
+fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, sh: Shape) {
     let badge = super::canvas::gly("\u{E9D2}", 0x1F2A1F, 0x34C759);
     let g = got(x, conn);
-    if placeholder(c, out, def.name, &badge, conn, &g, dense) {
+    if placeholder(c, out, def.name, &badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
     open_hit(out, c, "https://finance.yahoo.com");
-    if dense {
+    if matches!(sh, Shape::Mini | Shape::Dock) {
         if let Some(r) = f.rows.first() {
-            let s = c.h * 0.5;
-            c.badge(&badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-            let d = r.delta.unwrap_or(0.0);
-            dense_face(c, &r.value, &format!("{} {}", r.label, delta_str(d)), c.text1());
+            let mut s = Sum::new(Vis::Badge(badge), if sh == Shape::Mini { r.label.clone() } else { r.value.clone() }, r.label.clone());
+            s.delta = r.delta;
+            compact_sum(c, &s, sh);
         }
         return;
     }
-    let n = f.rows.len().min(4).max(1);
+    let small = sh == Shape::Small;
+    let n = f.rows.len().min(if c.h > 150.0 { 6 } else { 4 }).max(1);
     let rh = (c.h - 16.0) / n as f32;
-    for (k, r) in f.rows.iter().take(4).enumerate() {
+    for (k, r) in f.rows.iter().take(n).enumerate() {
         let y = 8.0 + k as f32 * rh + (rh - 16.0) / 2.0;
-        c.tw(&r.label, 16.0, y, 12.5, 600, c.text1(), 80.0);
-        c.text(&r.value, c.w * 0.62, y, 12.5, 500, c.text1(), Align::Right, 120.0, Font::Text);
         let d = r.delta.unwrap_or(0.0);
-        let (pw, ph) = (66.0, 18.0);
-        c.rr(c.w - 16.0 - pw, y - 1.0, pw, ph, 5.0, alpha(up_down(d), 0.9));
-        c.tc(&format!("{}{:.2}%", if d >= 0.0 { "+" } else { "" }, d), c.w - 16.0 - pw / 2.0, y + 1.0, 11.0, 600, (1.0, 1.0, 1.0, 1.0), pw);
+        let pw = if small { 54.0 } else { 66.0 };
+        c.tw(&r.label, 14.0, y, 12.0, 600, c.text1(), if small { c.w - pw - 30.0 } else { 80.0 });
+        if !small {
+            c.text(&r.value, c.w * 0.62, y, 12.5, 500, c.text1(), Align::Right, 120.0, Font::Text);
+        }
+        c.rr(c.w - 14.0 - pw, y - 1.0, pw, 18.0, 5.0, alpha(up_down(d), 0.9));
+        c.tc(&format!("{}{:.2}%", if d >= 0.0 { "+" } else { "" }, d), c.w - 14.0 - pw / 2.0, y + 1.0, 10.5, 600, WHITE, pw);
     }
 }
 
-fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, dense: bool) {
-    let badge = super::canvas::gly("\u{E787}", 0xFF3B30, 0xFFFFFF);
+fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
+    let badge = super::canvas::gly(G_CAL, 0xFF3B30, 0xFFFFFF);
     let g = got(x, "calendar");
-    if placeholder(c, out, def.name, &badge, "calendar", &g, dense) {
+    if placeholder(c, out, def.name, &badge, "calendar", &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -404,98 +634,140 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, dense: bool) {
         Some(m) if m < 24 * 60 => format!("in {} h {} min", m / 60, m % 60),
         _ => String::new(),
     };
-    if dense {
-        let s = c.h * 0.56;
-        c.badge(&badge, (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-        dense_face(c, &title, if soon.is_empty() { &when } else { &soon }, c.text1());
-        return;
-    }
-    c.badge(&badge, 16.0, 16.0, 34.0);
-    c.tw("Up next", 62.0, 16.0, 11.0, 600, RED, 100.0);
-    c.tw(&title, 62.0, 32.0, 15.0, 600, c.text1(), c.w - 78.0);
-    c.tw(&when, 62.0, 56.0, 11.5, 400, c.text2(), c.w - 160.0);
-    if !soon.is_empty() {
-        let pw = c.measure(&soon, 11.0, 600, Font::Text).0 + 16.0;
-        c.rr(c.w - 14.0 - pw, 54.0, pw, 20.0, 10.0, alpha(BLUE, 0.22));
-        c.tc(&soon, c.w - 14.0 - pw / 2.0, 56.0, 11.0, 600, BLUE, pw);
+    match sh {
+        Shape::Mini => {
+            let short = match mins {
+                Some(m) if (0..60).contains(&m) => format!("{m}m"),
+                Some(m) if (0..24 * 60).contains(&m) => format!("{}h", m / 60),
+                _ => "—".into(),
+            };
+            compact_sum(c, &Sum::new(Vis::Badge(badge), short, ""), sh);
+        }
+        Shape::Dock => compact_sum(c, &Sum::new(Vis::Badge(badge), title, if soon.is_empty() { when } else { soon }), sh),
+        Shape::Small => {
+            c.badge(&badge, 14.0, 14.0, 26.0);
+            c.tw("UP NEXT", 48.0, 20.0, 10.0, 700, RED, c.w - 60.0);
+            c.text(&title, 14.0, 48.0, 13.5, 600, c.text1(), Align::Left, c.w - 28.0, Font::Text);
+            c.tw(&when, 14.0, 70.0, 11.0, 400, c.text2(), c.w - 28.0);
+            if !soon.is_empty() {
+                c.tw(&soon, 14.0, c.h - 24.0, 11.0, 600, BLUE, c.w - 28.0);
+            }
+        }
+        _ => {
+            c.badge(&badge, 16.0, 16.0, 34.0);
+            c.tw("Up next", 62.0, 16.0, 11.0, 600, RED, 100.0);
+            c.tw(&title, 62.0, 32.0, 15.0, 600, c.text1(), c.w - 78.0);
+            c.tw(&when, 62.0, 56.0, 11.5, 400, c.text2(), c.w - 160.0);
+            if !soon.is_empty() {
+                let pw = c.measure(&soon, 11.0, 600, Font::Text).0 + 16.0;
+                c.rr(c.w - 14.0 - pw, 54.0, pw, 20.0, 10.0, alpha(BLUE, 0.22));
+                c.tc(&soon, c.w - 14.0 - pw / 2.0, 56.0, 11.0, 600, BLUE, pw);
+            }
+            if sh == Shape::Large {
+                let mut f2 = f.clone().into_owned();
+                f2.rows.retain(|r| r.label != title);
+                details(c, &f2, 100.0, BLUE);
+            }
+        }
     }
 }
 
-fn ai_all(c: &Canvas, out: &mut Painted, x: &Ctx, dense: bool) {
+fn ai_all(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let src: [(&'static str, &str, Col); 6] = [
-        ("claude_code", "Claude Code", hex(0xD97757)),
+        ("claude_code", "Claude Code", CLAUDE),
         ("codex", "Codex", hex(0x9AA0A6)),
-        ("anthropic", "Claude API", hex(0xD97757)),
+        ("anthropic", "Claude API", CLAUDE),
         ("openai", "OpenAI API", hex(0x10A37F)),
         ("openrouter", "OpenRouter", hex(0x6467F2)),
         ("cursor", "Cursor", hex(0xBBBBBB)),
     ];
     let mut rows: Vec<(&str, String, f32, Col)> = Vec::new();
     for (conn, name, col) in src {
-        let f = match x.hub.feed(conn) {
-            Some(f) => Cow::Borrowed(f),
-            None if x.sample && (conn == "claude_code" || conn == "openai" || conn == "codex") => Cow::Owned(super::hub::sample(conn)),
-            None => continue,
+        let f = match (x.hub.feed(conn), x.hub.err(conn)) {
+            (Some(f), None) => Cow::Borrowed(f),
+            _ if x.sample && (conn == "claude_code" || conn == "openai" || conn == "codex") => Cow::Owned(super::hub::sample(conn)),
+            _ => continue,
         };
         let v = if f.unit == "tokens" { format!("{} today", compact(f.value.unwrap_or(0.0))) } else { headline(&f) };
         rows.push((name, v, f.frac.unwrap_or(0.0), col));
     }
-    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect("anthropic")));
-    if dense {
-        let s = c.h * 0.56;
-        c.badge(&super::canvas::gly("\u{E99A}", 0x2C2C34, 0xD97757), (c.h - s) / 2.0, (c.h - s) / 2.0, s);
-        match rows.first() {
-            Some(r) => dense_face(c, &r.1, r.0, c.text1()),
-            None => dense_face(c, "AI Usage", "Click to connect", c.text1()),
+    let badge = super::canvas::gly(G_AI, 0x2C2C34, 0xD97757);
+    if matches!(sh, Shape::Mini | Shape::Dock) {
+        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect("anthropic")));
+        let s = match rows.first() {
+            Some(r) => Sum::new(Vis::Badge(badge), r.1.split(' ').next().unwrap_or("").to_string(), r.0),
+            None => Sum::new(Vis::Badge(badge), if sh == Shape::Mini { "" } else { "AI Usage" }, "Click to connect"),
         };
+        compact_sum(c, &s, sh);
         return;
     }
-    c.tw("AI Usage", 16.0, 12.0, 12.5, 600, c.text2(), 140.0);
+    let small = sh == Shape::Small;
+    c.tw("AI Usage", 14.0, 12.0, 12.5, 600, c.text2(), 140.0);
     if rows.is_empty() {
-        c.tw("Use Claude Code or Codex on this PC, or connect an API key.", 16.0, 40.0, 11.5, 400, c.text3(), c.w - 32.0);
+        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect("anthropic")));
+        c.text("Use Claude Code or Codex on this PC, or connect an API key.", 14.0, 40.0, 11.0, 400, c.text3(), Align::Left, c.w - 28.0, Font::Text);
         return;
     }
-    out.hits.clear();
-    for (k, (name, v, frac, col)) in rows.iter().take(3).enumerate() {
-        let y = 34.0 + k as f32 * 20.0;
-        c.circle(20.0, y + 8.0, 4.0, *col);
-        c.tw(name, 30.0, y, 12.0, 500, c.text1(), 110.0);
-        c.bar(140.0, y + 5.0, c.w - 140.0 - 96.0, 5.0, if *frac > 0.0 { *frac } else { 0.5 }, *col);
-        c.tr(v, c.w - 14.0, y, 11.5, 500, c.text2());
+    let n = if c.h > 150.0 { 6 } else { 3 };
+    let rh = if c.h > 150.0 || small { 28.0 } else { 20.0 };
+    for (k, (name, v, frac, col)) in rows.iter().take(n).enumerate() {
+        let y = 34.0 + k as f32 * rh;
+        c.circle(18.0, y + 8.0, 4.0, *col);
+        if small {
+            c.tw(name, 28.0, y, 11.0, 500, c.text1(), c.w - 40.0);
+            c.tw(v, 28.0, y + 13.0, 10.0, 400, c.text2(), c.w - 40.0);
+        } else {
+            c.tw(name, 28.0, y, 12.0, 500, c.text1(), 110.0);
+            c.bar(140.0, y + 5.0, c.w - 140.0 - 96.0, 5.0, if *frac > 0.0 { *frac } else { 0.5 }, *col);
+            c.tr(v, c.w - 14.0, y, 11.5, 500, c.text2());
+        }
     }
 }
 
-fn goal(c: &Canvas, out: &mut Painted, x: &Ctx, dense: bool) {
+fn goal(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let goal: f64 = x.cfg.widget_settings.get("revenue-goal").and_then(|m| m.get("goal")).and_then(|v| v.parse().ok()).unwrap_or(10_000.0);
     let mut total = 0.0;
     let mut n = 0;
     for conn in ["stripe", "lemonsqueezy", "paddle", "shopify", "gumroad", "polar"] {
-        let f = match x.hub.feed(conn) {
-            Some(f) => Cow::Borrowed(f),
-            None if x.sample && conn == "stripe" => Cow::Owned(super::hub::sample(conn)),
-            None => continue,
+        let f = match (x.hub.feed(conn), x.hub.err(conn)) {
+            (Some(f), None) => Cow::Borrowed(f),
+            _ if x.sample && conn == "stripe" => Cow::Owned(super::hub::sample(conn)),
+            _ => continue,
         };
         total += f.value.unwrap_or(0.0);
         n += 1;
     }
     let frac = (total / goal) as f32;
-    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect("stripe")));
-    let (cx, cy, r) = if dense { (c.h / 2.0, c.h / 2.0, c.h * 0.3) } else { (52.0, c.h / 2.0, 30.0) };
-    c.ring(cx, cy, r, if dense { 4.0 } else { 7.0 }, frac, GREEN);
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect("revenue-goal")));
     let pct = format!("{:.0}%", (frac * 100.0).min(999.0));
-    if dense {
-        dense_face(c, &money(total, Some("USD")), &format!("{pct} of goal"), c.text1());
+    if matches!(sh, Shape::Mini | Shape::Dock) {
+        let s = if sh == Shape::Mini { Sum::new(Vis::Ring(frac, GREEN, pct), "", "") } else { Sum::new(Vis::Ring(frac, GREEN, String::new()), money(total, Some("USD")), format!("{pct} of goal")) };
+        compact_sum(c, &s, sh);
         return;
     }
-    c.tc(&pct, cx, cy - 8.0, 13.0, 600, c.text1(), 60.0);
-    c.num(&money(total, Some("USD")), 100.0, 22.0, 26.0, 600, c.text1());
+    if sh == Shape::Small {
+        let r = 30.0;
+        c.ring(c.w / 2.0, 14.0 + r, r - 4.0, 7.0, frac, GREEN);
+        c.tc(&pct, c.w / 2.0, 14.0 + r - 9.0, 13.0, 600, c.text1(), 60.0);
+        c.tc(&money(total, Some("USD")), c.w / 2.0, 82.0, 15.0, 600, c.text1(), c.w - 16.0);
+        c.tc(&format!("of {}", money(goal, Some("USD"))), c.w / 2.0, 100.0, 10.5, 400, c.text2(), c.w - 16.0);
+        return;
+    }
+    let big = sh == Shape::Large;
+    let r = if big { 56.0 } else { 30.0 };
+    let (cx, cy) = (16.0 + r + 6.0, c.h / 2.0);
+    c.ring(cx, cy, r, if big { 11.0 } else { 7.0 }, frac, GREEN);
+    c.tc(&pct, cx, cy - if big { 14.0 } else { 9.0 }, if big { 20.0 } else { 13.0 }, 600, c.text1(), 2.0 * r);
+    let tx = cx + r + 22.0;
+    c.num(&money(total, Some("USD")), tx, cy - 30.0, 26.0, 600, c.text1());
     let sub = if n == 0 { "Connect a payment provider".to_string() } else { format!("of {} goal · last 30 days", money(goal, Some("USD"))) };
-    c.tw(&sub, 100.0, 58.0, 11.5, 400, c.text2(), c.w - 116.0);
+    c.text(&sub, tx, cy + 6.0, 11.5, 400, c.text2(), Align::Left, c.w - tx - 14.0, Font::Text);
 }
 
-fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory, dense: bool) {
-    let badge = super::canvas::gly("\u{E91B}", 0x2C6BED, 0xFFFFFF);
+fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagingFactory, sh: Shape) {
+    let badge = super::canvas::gly(G_IMAGE, 0x2C6BED, 0xFFFFFF);
     let g = got(x, "wallpaper");
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
     if let Got::Feed(f) = &g {
         let img = f.extra.get("image_path").and_then(|p| x.hub.wallpaper_img.as_ref().filter(|w| &w.0 == p).map(|w| w.1.clone()).or_else(|| load_image(wic, p)));
         let r = if dense { 12.0 } else { 18.0 };
@@ -506,32 +778,32 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &windows::W
         if !dense {
             c.rr_grad(0.0, c.h * 0.45, c.w, c.h * 0.55, r, (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.55));
             let title = f.extra.get("title").cloned().or_else(|| f.text.clone()).unwrap_or_else(|| "Image of the day".into());
-            c.tw(&title, 14.0, c.h - 30.0, 12.5, 600, (1.0, 1.0, 1.0, 1.0), c.w - 130.0);
-            let (bw, bh) = (104.0, 24.0);
-            c.rr(c.w - bw - 12.0, c.h - bh - 10.0, bw, bh, 12.0, (1.0, 1.0, 1.0, 0.92));
-            c.tc("Set wallpaper", c.w - 12.0 - bw / 2.0, c.h - bh - 6.0, 11.0, 600, (0.1, 0.1, 0.12, 1.0), bw);
-        }
-        if let Some(p) = f.extra.get("image_path") {
-            if !x.sample {
-                out.hits.push(((0.0, 0.0, c.w, c.h), WAct::SetWallpaper));
-                let _ = p;
+            if sh == Shape::Small {
+                c.tw(&title, 12.0, c.h - 24.0, 11.5, 600, WHITE, c.w - 24.0);
+            } else {
+                c.tw(&title, 14.0, c.h - 30.0, 12.5, 600, WHITE, c.w - 130.0);
+                let (bw, bh) = (104.0, 24.0);
+                c.rr(c.w - bw - 12.0, c.h - bh - 10.0, bw, bh, 12.0, (1.0, 1.0, 1.0, 0.92));
+                c.tc("Set wallpaper", c.w - 12.0 - bw / 2.0, c.h - bh - 6.0, 11.0, 600, (0.1, 0.1, 0.12, 1.0), bw);
             }
+        }
+        if f.extra.contains_key("image_path") && !x.sample {
+            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::SetWallpaper));
         }
         return;
     }
     bg(c, dense);
-    placeholder(c, out, def.name, &badge, "wallpaper", &g, dense);
+    placeholder(c, out, def.name, &badge, "wallpaper", &g, sh);
 }
 
-/// Decode an image file (cached by the hub on the UI thread when possible).
-pub fn load_image(wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory, path: &str) -> Option<IWICBitmapSource> {
+/// Decode an image file, scaled down for widget use.
+pub fn load_image(wic: &IWICImagingFactory, path: &str) -> Option<IWICBitmapSource> {
     use windows::core::{Interface, HSTRING};
-    use windows::Win32::Graphics::Imaging::*;
     use windows::Win32::Foundation::GENERIC_READ;
+    use windows::Win32::Graphics::Imaging::*;
     unsafe {
         let dec = wic.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnLoad).ok()?;
         let frame = dec.GetFrame(0).ok()?;
-        // Scale down first: the wallpaper is 1920x1080 and the widget is small.
         let scaler = wic.CreateBitmapScaler().ok()?;
         let (mut w, mut h) = (0u32, 0u32);
         frame.GetSize(&mut w, &mut h).ok()?;
@@ -544,7 +816,7 @@ pub fn load_image(wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory, p
     }
 }
 
-pub fn load_image_bytes(wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory, bytes: &[u8]) -> Option<IWICBitmapSource> {
+pub fn load_image_bytes(wic: &IWICImagingFactory, bytes: &[u8]) -> Option<IWICBitmapSource> {
     use windows::core::Interface;
     use windows::Win32::Graphics::Imaging::*;
     unsafe {
@@ -576,6 +848,7 @@ fn ampm(h: u32) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dial(c: &Canvas, cx: f32, cy: f32, r: f32, h: u32, m: u32, s: Option<u32>, dark: bool) {
     let (face, ink) = if dark { ((0.11, 0.11, 0.13, 1.0), (1.0, 1.0, 1.0, 0.95)) } else { ((0.97, 0.97, 0.98, 1.0), (0.08, 0.08, 0.1, 1.0)) };
     c.circle(cx, cy, r, face);
@@ -596,6 +869,37 @@ fn dial(c: &Canvas, cx: f32, cy: f32, r: f32, h: u32, m: u32, s: Option<u32>, da
     c.circle(cx, cy, r * 0.06, ORANGE);
 }
 
+/// The analog face in a rounded square, with numerals at 12, 3, 6 and 9 when there's room.
+#[allow(clippy::too_many_arguments)]
+fn square_dial(c: &Canvas, x0: f32, y0: f32, s: f32, h: u32, m: u32, sec: u32) {
+    let dark = !c.light;
+    let (face, ink) = if dark { ((0.11, 0.11, 0.13, 1.0), (1.0, 1.0, 1.0, 0.95)) } else { ((0.97, 0.97, 0.98, 1.0), (0.08, 0.08, 0.1, 1.0)) };
+    c.rr(x0, y0, s, s, s * 0.24, face);
+    let (cx, cy) = (x0 + s / 2.0, y0 + s / 2.0);
+    if s >= 60.0 {
+        let fs = s * 0.13;
+        for (num, dx, dy) in [("12", 0.0, -1.0), ("3", 1.0, 0.0), ("6", 0.0, 1.0), ("9", -1.0, 0.0)] {
+            let r = s * 0.37;
+            c.text(num, cx + dx * r, cy + dy * r - fs * 0.66, fs, 600, alpha(ink, 0.8), Align::Center, fs * 2.0, Font::Display);
+        }
+    } else {
+        for i in 0..4 {
+            let a = (i as f32 * 90.0).to_radians();
+            let r = s * 0.4;
+            c.circle(cx + r * a.sin(), cy - r * a.cos(), s * 0.025, alpha(ink, 0.7));
+        }
+    }
+    let hand = |deg: f32, len: f32, t: f32, col: Col| {
+        let a = deg.to_radians();
+        c.line(cx - len * 0.12 * a.sin(), cy + len * 0.12 * a.cos(), cx + len * a.sin(), cy - len * a.cos(), t, col);
+    };
+    hand((h % 12) as f32 * 30.0 + m as f32 * 0.5, s * 0.22, s * 0.045, ink);
+    hand(m as f32 * 6.0 + sec as f32 * 0.1, s * 0.33, s * 0.032, ink);
+    hand(sec as f32 * 6.0, s * 0.36, s * 0.015, ORANGE);
+    c.circle(cx, cy, s * 0.03, ORANGE);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn seg_digit(c: &Canvas, x: f32, y: f32, w: f32, h: f32, d: u32, on: Col, off: Col) {
     // a b c d e f g
     const SEGS: [u8; 10] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
@@ -616,89 +920,223 @@ fn seg_digit(c: &Canvas, x: f32, y: f32, w: f32, h: f32, d: u32, on: Col, off: C
     }
 }
 
-fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, dense: bool) {
+fn month_grid(c: &Canvas, n: &super::Now, x0: f32, y0: f32, w: f32, h: f32) {
+    let colw = w / 7.0;
+    let first = n.first_weekday();
+    let rows = (first + n.days_in_month()).div_ceil(7) as f32;
+    let head = (h * 0.12).clamp(10.0, 20.0);
+    let rh = (h - head) / rows;
+    let fs = (rh * 0.55).min(colw * 0.5).clamp(7.0, 12.5);
+    for (i, d) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
+        c.tc(d, x0 + colw * (i as f32 + 0.5), y0, fs * 0.85, 600, c.text3(), colw);
+    }
+    for day in 1..=n.days_in_month() {
+        let idx = first + day - 1;
+        let cx = x0 + colw * ((idx % 7) as f32 + 0.5);
+        let cy = y0 + head + rh * (idx / 7) as f32 + rh / 2.0;
+        let today = day == n.day;
+        if today {
+            c.circle(cx, cy, (rh * 0.46).min(colw * 0.46), RED);
+        }
+        c.tc(&day.to_string(), cx, cy - fs * 0.68, fs, if today { 700 } else { 400 }, if today { WHITE } else { c.text1() }, colw);
+    }
+}
+
+/// This week as a row: day letters and dates, today marked.
+fn week_row(c: &Canvas, n: &super::Now, x0: f32, y0: f32, w: f32, h: f32) {
+    let colw = w / 7.0;
+    let r = (h * 0.28).min(colw * 0.42).min(16.0);
+    let fs = (r * 0.95).max(8.0);
+    let ls = (h * 0.2).clamp(8.0, 11.0);
+    for i in 0..7u32 {
+        let off = i as i64 - n.weekday as i64;
+        let d = n.day as i64 + off;
+        let dim = super::days_in_month(n.year, n.month) as i64;
+        let prev = super::days_in_month(n.year, if n.month == 1 { 12 } else { n.month - 1 }) as i64;
+        let shown = if d < 1 { d + prev } else if d > dim { d - dim } else { d };
+        let cx = x0 + colw * (i as f32 + 0.5);
+        let today = off == 0;
+        c.tc(&DAYS[i as usize][..1], cx, y0, ls, 600, if today { BLUE } else { c.text3() }, colw);
+        let cy = y0 + ls * 1.5 + (h - ls * 1.5) / 2.0;
+        if today {
+            c.circle(cx, cy, r, BLUE);
+        }
+        c.tc(&shown.to_string(), cx, cy - fs * 0.68, fs, if today { 700 } else { 500 }, if today { WHITE } else { c.text1() }, colw);
+    }
+}
+
+/// A tear-off calendar page for today.
+fn day_tile(c: &Canvas, n: &super::Now, sh: Shape) {
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
+    let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
+    let (x0, y0) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
+    if !dense && c.w > c.h * 1.3 {
+        bg(c, false);
+    }
+    c.rr(x0, y0, s, s, s * 0.2, (0.98, 0.98, 0.99, 1.0));
+    let hh = s * 0.28;
+    c.rr(x0, y0, s, hh + s * 0.2, s * 0.2, RED);
+    c.rr(x0, y0 + hh, s, s * 0.2, 0.0, (0.98, 0.98, 0.99, 1.0));
+    c.tc(&MONTHS[n.month as usize - 1][..3].to_uppercase(), x0 + s / 2.0, y0 + hh * 0.18, hh * 0.62, 700, WHITE, s);
+    c.text(&n.day.to_string(), x0 + s / 2.0, y0 + hh + s * 0.02, s * 0.5, 600, (0.1, 0.1, 0.12, 1.0), Align::Center, s, Font::Display);
+}
+
+fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, sh: Shape) {
     let n = x.now;
     let time = format!("{}:{:02}", h12(n.hour), n.minute);
-    let date_long = format!("{}, {} {}", DAYS[n.weekday as usize], MONTHS[n.month as usize - 1], n.day);
-    let date_short = format!("{} {} {}", &DAYS[n.weekday as usize][..3], &MONTHS[n.month as usize - 1][..3], n.day);
+    let mon = MONTHS[n.month as usize - 1];
+    let day = DAYS[n.weekday as usize];
+    let date_long = format!("{day}, {mon} {}", n.day);
+    let date_short = format!("{} {} {}", &day[..3], &mon[..3], n.day);
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:dateandtime".into())));
     match k {
-        ClockKind::Digital | ClockKind::ClockWeather if dense => {
-            let x0 = 10.0;
-            let ts = (c.h * 0.4).max(15.0);
-            let tw = c.text(&time, x0, c.h * 0.12, ts, 600, c.text1(), Align::Left, c.w, Font::Display);
-            c.tw(ampm(n.hour), x0 + tw + 3.0, c.h * 0.12 + ts * 0.42, ts * 0.42, 500, c.text2(), 30.0);
-            let cap = if k == ClockKind::ClockWeather { x.weather.map(|w| format!("{} {:.0}°", weather_emoji(w.code, w.is_day), d0(w.temp_c))).unwrap_or(date_short) } else { date_short };
-            c.tw(&cap, x0, c.h * 0.12 + ts * 1.24, (c.h * 0.19).max(9.5), 400, c.text2(), c.w - x0 - 4.0);
-        }
-        ClockKind::Digital => {
-            let tw = c.num(&time, 16.0, 6.0, 50.0, 300, c.text1());
-            c.num(&format!(":{:02}", n.second), 18.0 + tw, 30.0, 22.0, 300, c.text3());
-            c.tw(ampm(n.hour), 20.0 + tw + 34.0, 34.0, 15.0, 500, c.text2(), 40.0);
-            c.tw(&date_long, 18.0, 68.0, 13.0, 400, c.text2(), c.w - 36.0);
+        ClockKind::Digital | ClockKind::ClockWeather => {
+            let weather = if k == ClockKind::ClockWeather { x.weather.map(|w| (weather_emoji(w.code, w.is_day), format!("{:.0}°", d0(w.temp_c)))) } else { None };
+            match sh {
+                Shape::Mini => {
+                    let fs = fit(c, &time, c.h * 0.36, 9.0, 600, Font::Display, c.w - 6.0);
+                    c.text(&time, c.w / 2.0, c.h * 0.2, fs, 600, c.text1(), Align::Center, c.w, Font::Display);
+                    let sub = weather.as_ref().map(|w| w.1.clone()).unwrap_or_else(|| ampm(n.hour).to_string());
+                    c.tc(&sub, c.w / 2.0, c.h * 0.2 + fs * 1.22, c.h * 0.18, 600, c.text2(), c.w);
+                }
+                Shape::Dock => {
+                    // Time on the left; the date (or weather) beside it when there's room, else under it.
+                    let ts = (c.h * 0.42).max(15.0);
+                    let tw = c.measure(&time, ts, 600, Font::Display).0;
+                    let aw = c.measure(ampm(n.hour), ts * 0.4, 600, Font::Text).0;
+                    let beside = c.w > 12.0 + tw + aw + 10.0 + c.h * 1.2;
+                    let x0 = 12.0;
+                    if beside {
+                        let ty = (c.h - ts * 1.3) / 2.0;
+                        c.text(&time, x0, ty, ts, 600, c.text1(), Align::Left, c.w, Font::Display);
+                        c.tw(ampm(n.hour), x0 + tw + 3.0, ty + ts * 0.66, ts * 0.38, 600, c.text2(), 30.0);
+                        let rx = x0 + tw + aw + 16.0;
+                        c.line(rx - 7.0, c.h * 0.28, rx - 7.0, c.h * 0.72, 1.0, c.ink(0.15));
+                        let cs = (c.h * 0.2).max(9.5);
+                        match &weather {
+                            Some((e, t)) => {
+                                c.text(e, rx, c.h / 2.0 - cs * 1.05, cs * 1.4, 400, c.text1(), Align::Left, 40.0, Font::Text);
+                                c.tw(t, rx + cs * 1.9, c.h / 2.0 - cs * 0.85, cs * 1.25, 600, c.text1(), c.w - rx - cs * 1.9 - 6.0);
+                            }
+                            None => {
+                                c.tw(&day[..3].to_uppercase(), rx, c.h / 2.0 - cs * 1.3, cs, 700, RED, c.w - rx - 6.0);
+                                c.tw(&format!("{} {}", &mon[..3], n.day), rx, c.h / 2.0 - 1.0, cs * 1.15, 600, c.text1(), c.w - rx - 6.0);
+                            }
+                        }
+                    } else {
+                        let ty = c.h * 0.12;
+                        c.text(&time, x0, ty, ts, 600, c.text1(), Align::Left, c.w, Font::Display);
+                        c.tw(ampm(n.hour), x0 + tw + 3.0, ty + ts * 0.42, ts * 0.42, 500, c.text2(), 30.0);
+                        let cap = weather.map(|(e, t)| format!("{e} {t}")).unwrap_or(date_short);
+                        c.tw(&cap, x0, ty + ts * 1.24, (c.h * 0.19).max(9.5), 400, c.text2(), c.w - x0 - 4.0);
+                    }
+                }
+                Shape::Small => {
+                    let fs = fit(c, &time, 40.0, 20.0, 300, Font::Display, c.w - 28.0);
+                    c.num(&time, 14.0, 16.0, fs, 300, c.text1());
+                    c.tw(ampm(n.hour), 16.0, 16.0 + fs * 1.22, 11.0, 600, c.text2(), 40.0);
+                    match weather {
+                        Some((e, t)) => {
+                            c.text(e, 14.0, c.h - 36.0, 18.0, 400, c.text1(), Align::Left, 30.0, Font::Text);
+                            c.tw(&t, 40.0, c.h - 32.0, 14.0, 600, c.text1(), c.w - 54.0);
+                        }
+                        None => {
+                            c.tw(&date_short, 14.0, c.h - 28.0, 11.5, 400, c.text2(), c.w - 28.0);
+                        }
+                    }
+                }
+                Shape::Medium if k == ClockKind::Digital => {
+                    let tw = c.num(&time, 16.0, 6.0, 50.0, 300, c.text1());
+                    c.num(&format!(":{:02}", n.second), 18.0 + tw, 30.0, 22.0, 300, c.text3());
+                    c.tw(ampm(n.hour), 20.0 + tw + 34.0, 34.0, 15.0, 500, c.text2(), 40.0);
+                    c.tw(&date_long, 18.0, 68.0, 13.0, 400, c.text2(), c.w - 36.0);
+                }
+                Shape::Medium => {
+                    let tw = c.num(&time, 16.0, 12.0, 40.0, 400, c.text1());
+                    c.tw(ampm(n.hour), 20.0 + tw, 34.0, 13.0, 500, c.text2(), 40.0);
+                    c.tw(&date_long, 18.0, 66.0, 12.0, 400, c.text2(), c.w * 0.6);
+                    if let Some((e, t)) = weather {
+                        c.text(e, c.w - 60.0, 16.0, 28.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
+                        c.tr(&t, c.w - 16.0, 56.0, 20.0, 500, c.text1());
+                    }
+                }
+                Shape::Large => {
+                    // Big time with seconds, the date, and this week underneath.
+                    let tw = c.num(&time, 16.0, 6.0, 64.0, 200, c.text1());
+                    c.num(&format!(":{:02}", n.second), 20.0 + tw, 38.0, 26.0, 300, c.text3());
+                    c.tw(ampm(n.hour), 20.0 + tw + 42.0, 42.0, 16.0, 500, c.text2(), 40.0);
+                    c.tw(&date_long, 18.0, 86.0, 13.0, 500, c.text2(), c.w - 36.0);
+                    if let Some((e, t)) = weather {
+                        c.text(e, c.w - 56.0, 18.0, 30.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
+                        c.tr(&t, c.w - 18.0, 62.0, 20.0, 500, c.text1());
+                    }
+                    week_row(c, &n, 14.0, 124.0, c.w - 28.0, c.h - 136.0);
+                }
+            }
         }
         ClockKind::Flip => {
             let digits = [h12(n.hour) / 10, h12(n.hour) % 10, n.minute / 10, n.minute % 10];
+            let dense = matches!(sh, Shape::Mini | Shape::Dock);
             let pad = if dense { 5.0 } else { 14.0 };
-            let gap = if dense { 3.0 } else { 6.0 };
-            let mid = if dense { 6.0 } else { 14.0 };
+            let gap = if dense { 2.0 } else { 6.0 };
+            let mid = if dense { 5.0 } else { 12.0 };
             let tw = (c.w - 2.0 * pad - 3.0 * gap - mid) / 4.0;
-            let th = c.h - 2.0 * pad - if dense { 0.0 } else { 0.0 };
+            let th = (c.h - 2.0 * pad).min(tw * 1.5);
+            let top = (c.h - th) / 2.0;
             let mut tx = pad;
             for (i, d) in digits.iter().enumerate() {
                 if i == 2 {
                     tx += mid - gap;
                 }
-                c.rr(tx, pad, tw, th, tw * 0.14, if c.light { (0.15, 0.15, 0.17, 1.0) } else { (0.16, 0.16, 0.19, 1.0) });
-                c.text(&d.to_string(), tx + tw / 2.0, pad + th / 2.0 - th * 0.42, th * 0.62, 600, (0.97, 0.97, 0.98, 1.0), Align::Center, tw, Font::Display);
-                c.line(tx, pad + th / 2.0, tx + tw, pad + th / 2.0, 1.2, (0.0, 0.0, 0.0, 0.6));
+                c.rr(tx, top, tw, th, tw * 0.14, if c.light { (0.15, 0.15, 0.17, 1.0) } else { (0.16, 0.16, 0.19, 1.0) });
+                let fs = (th * 0.62).min(tw * 1.05);
+                c.text(&d.to_string(), tx + tw / 2.0, top + th / 2.0 - fs * 0.68, fs, 600, (0.97, 0.97, 0.98, 1.0), Align::Center, tw, Font::Display);
+                c.line(tx, top + th / 2.0, tx + tw, top + th / 2.0, 1.2, (0.0, 0.0, 0.0, 0.6));
                 tx += tw + gap;
             }
         }
         ClockKind::World => {
             let cities = super::world_cities(x.cfg);
-            let n_c = cities.len().min(if dense { 2 } else { 3 });
+            let n_c = match sh {
+                Shape::Mini => 1,
+                Shape::Dock | Shape::Small => 2,
+                _ => 3,
+            }
+            .min(cities.len());
+            let labels = !matches!(sh, Shape::Mini | Shape::Dock);
             let slot = c.w / n_c as f32;
             for (i, (label, key)) in cities.iter().take(n_c).enumerate() {
                 let (h, m, s, _) = super::tz_now(key).unwrap_or((n.hour, n.minute, n.second, n.weekday));
                 let cx = slot * (i as f32 + 0.5);
-                let r = if dense { c.h * 0.4 } else { 27.0 };
-                let cy = if dense { c.h / 2.0 } else { 38.0 };
-                dial(c, cx, cy, r, h, m, Some(s), h < 6 || h >= 18);
-                if !dense {
-                    let short: String = label.chars().take(3).collect::<String>().to_uppercase();
-                    c.tc(&short, cx, 70.0, 11.0, 600, c.text2(), slot);
+                let room = if labels { c.h - if sh == Shape::Large { 50.0 } else { 34.0 } } else { c.h - 6.0 };
+                let r = (room / 2.0).min(slot / 2.0 - 6.0);
+                let cy = if labels { 10.0 + r } else { c.h / 2.0 };
+                dial(c, cx, cy, r, h, m, Some(s), !(6..18).contains(&h));
+                if labels {
+                    let name = if sh == Shape::Large { label.clone() } else { label.chars().take(3).collect::<String>().to_uppercase() };
+                    c.tc(&name, cx, cy + r + 6.0, 11.0, 600, c.text2(), slot);
+                    if sh == Shape::Large {
+                        c.tc(&format!("{}:{:02} {}", h12(h), m, ampm(h)), cx, cy + r + 22.0, 11.0, 400, c.text3(), slot);
+                    }
                 }
             }
         }
-        ClockKind::WeekStrip => {
-            let pad = if dense { 6.0 } else { 14.0 };
-            if !dense {
-                c.tw(&format!("{} {}", MONTHS[n.month as usize - 1], n.year), pad, 10.0, 12.5, 600, c.text1(), c.w - 30.0);
-            }
-            let top = if dense { 4.0 } else { 34.0 };
-            let colw = (c.w - 2.0 * pad) / 7.0;
-            for i in 0..7u32 {
-                let off = i as i64 - n.weekday as i64;
-                let d = (n.day as i64 + off).rem_euclid(1000);
-                let dim = super::days_in_month(n.year, n.month) as i64;
-                let shown = if d < 1 { d + super::days_in_month(n.year, if n.month == 1 { 12 } else { n.month - 1 }) as i64 } else if d > dim { d - dim } else { d };
-                let cx = pad + colw * (i as f32 + 0.5);
-                let today = off == 0;
-                c.tc(&DAYS[i as usize][..1], cx, top, if dense { 9.5 } else { 11.0 }, 600, if today { BLUE } else { c.text3() }, colw);
-                let r = if dense { c.h * 0.2 } else { 15.0 };
-                let cy = if dense { c.h * 0.64 } else { 68.0 };
-                if today {
-                    c.circle(cx, cy, r, BLUE);
+        ClockKind::WeekStrip => match sh {
+            Shape::Mini | Shape::Small => day_tile(c, &n, sh),
+            Shape::Dock => week_row(c, &n, 6.0, 4.0, c.w - 12.0, c.h - 8.0),
+            _ => {
+                c.tw(&format!("{mon} {}", n.year), 14.0, 10.0, 12.5, 600, c.text1(), c.w - 30.0);
+                week_row(c, &n, 14.0, 32.0, c.w - 28.0, if sh == Shape::Large { 70.0 } else { c.h - 40.0 });
+                if sh == Shape::Large {
+                    month_grid(c, &n, 14.0, 110.0, c.w - 28.0, c.h - 116.0);
                 }
-                c.tc(&shown.to_string(), cx, cy - r * 0.62, r * 0.95, if today { 700 } else { 500 }, if today { (1.0, 1.0, 1.0, 1.0) } else { c.text1() }, colw);
             }
-        }
+        },
         ClockKind::WorldTime => {
             let cities = super::world_cities(x.cfg);
             let (label, key) = cities.into_iter().nth(2).unwrap_or(("Tokyo".into(), "Tokyo Standard Time".into()));
             let (h, m, _, wd) = super::tz_now(&key).unwrap_or((n.hour, n.minute, 0, n.weekday));
-            let day = if wd == n.weekday { "Today" } else if wd == (n.weekday + 1) % 7 { "Tomorrow" } else { "Yesterday" };
+            let dname = if wd == n.weekday { "Today" } else if wd == (n.weekday + 1) % 7 { "Tomorrow" } else { "Yesterday" };
             let diff = {
                 let mut d = (h as i32 * 60 + m as i32) - (n.hour as i32 * 60 + n.minute as i32);
                 if wd == (n.weekday + 1) % 7 {
@@ -708,64 +1146,112 @@ fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, dense: bool) {
                 }
                 d as f32 / 60.0
             };
-            if dense {
-                c.glyph(G_CLOCK, c.h / 2.0, c.h / 2.0, c.h * 0.36, c.text2());
-                dense_face(c, &format!("{}:{:02}", h12(h), m), &label, c.text1());
-                return;
+            let t = format!("{}:{:02}", h12(h), m);
+            let offset = format!("{dname}, {}{:.0}h", if diff >= 0.0 { "+" } else { "" }, diff);
+            match sh {
+                Shape::Mini | Shape::Dock => compact_sum(c, &Sum::new(Vis::Glyph(G_CLOCK, c.text1()), t, label.clone()), sh),
+                Shape::Small => {
+                    c.circle(20.0, 22.0, 5.0, if (6..18).contains(&h) { YELLOW } else { hex(0x8E8EFF) });
+                    c.tw(&label, 32.0, 14.0, 12.5, 600, c.text1(), c.w - 44.0);
+                    let fs = fit(c, &t, 36.0, 18.0, 300, Font::Display, c.w - 50.0);
+                    c.num(&t, 14.0, 40.0, fs, 300, c.text1());
+                    c.tw(ampm(h), 18.0 + c.measure(&t, fs, 300, Font::Display).0, 40.0 + fs * 0.62, 11.0, 600, c.text2(), 30.0);
+                    c.tw(&offset, 14.0, c.h - 26.0, 11.0, 400, c.text2(), c.w - 28.0);
+                }
+                _ => {
+                    c.circle(22.0, 24.0, 5.0, if (6..18).contains(&h) { YELLOW } else { hex(0x8E8EFF) });
+                    c.tw(&label, 34.0, 15.0, 13.0, 600, c.text1(), c.w * 0.5);
+                    c.tw(&offset, 16.0, 40.0, 11.5, 400, c.text2(), c.w * 0.5);
+                    let tw = c.measure(ampm(h), 14.0, 500, Font::Text).0;
+                    c.text(&t, c.w - 22.0 - tw, 14.0, 40.0, 300, c.text1(), Align::Right, c.w, Font::Display);
+                    c.tr(ampm(h), c.w - 16.0, 36.0, 14.0, 500, c.text2());
+                    if sh == Shape::Large {
+                        // The other cities too.
+                        for (i, (l, key)) in super::world_cities(x.cfg).into_iter().take(2).enumerate() {
+                            let (hh, mm, _, _) = super::tz_now(&key).unwrap_or((n.hour, n.minute, 0, n.weekday));
+                            let y = 110.0 + i as f32 * 42.0;
+                            c.line(16.0, y - 8.0, c.w - 16.0, y - 8.0, 1.0, c.ink(0.08));
+                            c.tw(&l, 16.0, y + 4.0, 13.0, 600, c.text1(), c.w * 0.5);
+                            c.tr(&format!("{}:{:02} {}", h12(hh), mm, ampm(hh)), c.w - 16.0, y, 20.0, 300, c.text1());
+                        }
+                    }
+                }
             }
-            c.circle(22.0, 24.0, 5.0, if (6..18).contains(&h) { YELLOW } else { hex(0x8E8EFF) });
-            c.tw(&label, 34.0, 15.0, 13.0, 600, c.text1(), c.w * 0.5);
-            c.tw(&format!("{day}, {}{:.0}h", if diff >= 0.0 { "+" } else { "" }, diff), 16.0, 40.0, 11.5, 400, c.text2(), c.w * 0.5);
-            let tw = c.measure(ampm(h), 14.0, 500, Font::Text).0;
-            c.text(&format!("{}:{:02}", h12(h), m), c.w - 22.0 - tw, 14.0, 40.0, 300, c.text1(), Align::Right, c.w, Font::Display);
-            c.tr(ampm(h), c.w - 16.0, 36.0, 14.0, 500, c.text2());
         }
         ClockKind::Today => {
             let next = x.hub.feed("calendar").and_then(|f| f.extra.get("next_title").map(|t| format!("{t} · {}", f.extra.get("next_time").cloned().unwrap_or_default())));
-            if dense {
-                c.tw(&DAYS[n.weekday as usize].to_uppercase(), 10.0, c.h * 0.12, (c.h * 0.18).max(9.0), 700, RED, c.w);
-                c.num(&format!("{} {}", &MONTHS[n.month as usize - 1][..3], n.day), 10.0, c.h * 0.34, c.h * 0.36, 600, c.text1());
-                return;
+            match sh {
+                Shape::Mini => day_tile(c, &n, sh),
+                Shape::Dock => {
+                    c.tw(&day.to_uppercase(), 10.0, c.h * 0.12, (c.h * 0.18).max(9.0), 700, RED, c.w - 12.0);
+                    let t = format!("{} {}", &mon[..3], n.day);
+                    c.num(&t, 10.0, c.h * 0.36, fit(c, &t, c.h * 0.36, 9.0, 600, Font::Display, c.w - 12.0), 600, c.text1());
+                }
+                Shape::Small => {
+                    c.tw(&day.to_uppercase(), 14.0, 14.0, 11.0, 700, RED, c.w - 28.0);
+                    c.num(&n.day.to_string(), 12.0, 28.0, 44.0, 400, c.text1());
+                    c.tw(mon, 14.0, 84.0, 12.0, 600, c.text1(), c.w - 28.0);
+                    c.tw(next.as_deref().unwrap_or("No more events"), 14.0, c.h - 20.0, 10.0, 400, c.text3(), c.w - 28.0);
+                }
+                _ => {
+                    c.tw(&day.to_uppercase(), 16.0, 12.0, 11.5, 700, RED, 160.0);
+                    c.num(&format!("{mon} {}", n.day), 16.0, 28.0, 26.0, 600, c.text1());
+                    c.tr(&format!("{} {}", time, ampm(n.hour)), c.w - 16.0, 14.0, 13.0, 500, c.text2());
+                    c.tw(&next.unwrap_or_else(|| "No more events today".into()), 16.0, 68.0, 11.5, 400, c.text2(), c.w - 32.0);
+                    if sh == Shape::Large {
+                        month_grid(c, &n, 14.0, 100.0, c.w - 28.0, c.h - 108.0);
+                    }
+                }
             }
-            c.tw(&DAYS[n.weekday as usize].to_uppercase(), 16.0, 12.0, 11.5, 700, RED, 160.0);
-            c.num(&format!("{} {}", MONTHS[n.month as usize - 1], n.day), 16.0, 28.0, 26.0, 600, c.text1());
-            c.tr(&format!("{} {}", time, ampm(n.hour)), c.w - 16.0, 14.0, 13.0, 500, c.text2());
-            c.tw(&next.unwrap_or_else(|| "No more events today".into()), 16.0, 68.0, 11.5, 400, c.text2(), c.w - 32.0);
         }
-        ClockKind::Date => {
-            if dense {
-                c.tw(DAYS[n.weekday as usize], 10.0, c.h * 0.12, (c.h * 0.19).max(9.5), 400, c.text2(), c.w);
-                c.num(&format!("{} {}", &MONTHS[n.month as usize - 1][..3], n.day), 10.0, c.h * 0.36, c.h * 0.36, 600, c.text1());
-                return;
+        ClockKind::Date => match sh {
+            Shape::Mini => day_tile(c, &n, sh),
+            Shape::Dock => {
+                c.tw(day, 12.0, c.h * 0.14, (c.h * 0.19).max(9.5), 400, c.text2(), c.w);
+                let t = format!("{} {}", &mon[..3], n.day);
+                c.num(&t, 12.0, c.h * 0.38, fit(c, &t, c.h * 0.36, 10.0, 600, Font::Display, c.w - 16.0), 600, c.text1());
             }
-            c.tw(DAYS[n.weekday as usize], 18.0, 18.0, 13.0, 400, c.text2(), c.w);
-            c.num(&format!("{} {}", MONTHS[n.month as usize - 1], n.day), 18.0, 36.0, 30.0, 600, c.text1());
-        }
-        ClockKind::DayPage => {
-            let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
-            let (x0, y0) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
-            c.rr(x0, y0, s, s, s * 0.2, (0.98, 0.98, 0.99, 1.0));
-            let hh = s * 0.28;
-            c.rr(x0, y0, s, hh + s * 0.2, s * 0.2, RED);
-            c.rr(x0, y0 + hh, s, s * 0.2, 0.0, (0.98, 0.98, 0.99, 1.0));
-            c.tc(&MONTHS[n.month as usize - 1][..3].to_uppercase(), x0 + s / 2.0, y0 + hh * 0.18, hh * 0.62, 700, (1.0, 1.0, 1.0, 1.0), s);
-            c.text(&n.day.to_string(), x0 + s / 2.0, y0 + hh + s * 0.02, s * 0.5, 600, (0.1, 0.1, 0.12, 1.0), Align::Center, s, Font::Display);
-        }
+            Shape::Small => {
+                c.tw(day, 14.0, 16.0, 12.0, 400, c.text2(), c.w - 28.0);
+                c.num(&n.day.to_string(), 12.0, 32.0, 46.0, 500, c.text1());
+                c.tw(mon, 14.0, 90.0, 13.0, 600, c.text1(), c.w - 28.0);
+            }
+            _ => {
+                c.tw(day, 18.0, 18.0, 13.0, 400, c.text2(), c.w);
+                c.num(&format!("{mon} {}", n.day), 18.0, 36.0, 30.0, 600, c.text1());
+                if sh == Shape::Large {
+                    month_grid(c, &n, 14.0, 92.0, c.w - 28.0, c.h - 100.0);
+                }
+            }
+        },
+        ClockKind::DayPage => day_tile(c, &n, sh),
         ClockKind::Analog => {
-            let r = c.h.min(c.w) / 2.0 - if dense { 4.0 } else { 10.0 };
+            let r = c.h.min(c.w) / 2.0 - if matches!(sh, Shape::Mini | Shape::Dock) { 3.0 } else { 10.0 };
             dial(c, c.w / 2.0, c.h / 2.0, r, n.hour, n.minute, Some(n.second), !c.light);
+        }
+        ClockKind::AnalogSquare => {
+            let dense = matches!(sh, Shape::Mini | Shape::Dock);
+            let s = c.h.min(c.w) - if dense { 4.0 } else { 16.0 };
+            if !dense && c.w > c.h * 1.3 {
+                bg(c, false);
+            }
+            square_dial(c, (c.w - s) / 2.0, (c.h - s) / 2.0, s, n.hour, n.minute, n.second);
         }
         ClockKind::Segment => {
             let on = RED;
             let off = c.ink(0.06);
-            let pad = if dense { 6.0 } else { 16.0 };
-            let top = if dense { pad } else { 26.0 };
-            let dh = c.h - top - pad;
+            let dense = matches!(sh, Shape::Mini | Shape::Dock);
+            let pad = if dense { 6.0 } else { 14.0 };
+            let top = if dense || sh == Shape::Small { pad } else { 26.0 };
+            // Four digits (0.55 wide, spaced 1.25) and a colon (0.45), fitted both ways.
+            let units = 4.0 * 0.55 * 1.25 + 0.45 * 0.55;
+            let dh = (c.h - top - pad).min((c.w - 2.0 * pad) / units);
             let dw = dh * 0.55;
             let colon = dw * 0.45;
             let total = 4.0 * dw + 3.0 * dw * 0.25 + colon;
             let mut sx = (c.w - total) / 2.0;
-            if !dense {
+            let y0 = top + (c.h - top - pad - dh) / 2.0;
+            if !dense && sh != Shape::Small {
                 c.tw(ampm(n.hour), 16.0, 8.0, 10.5, 700, RED, 40.0);
                 c.tr(&date_short.to_uppercase(), c.w - 16.0, 8.0, 10.5, 700, c.text3());
             }
@@ -773,49 +1259,34 @@ fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, dense: bool) {
             for (i, v) in d.iter().enumerate() {
                 if i == 2 {
                     let blink = if n.second % 2 == 0 { on } else { off };
-                    c.circle(sx + colon / 2.0 - dw * 0.12, top + dh * 0.3, dw * 0.09, blink);
-                    c.circle(sx + colon / 2.0 - dw * 0.12, top + dh * 0.7, dw * 0.09, blink);
+                    c.circle(sx + colon / 2.0 - dw * 0.12, y0 + dh * 0.3, dw * 0.09, blink);
+                    c.circle(sx + colon / 2.0 - dw * 0.12, y0 + dh * 0.7, dw * 0.09, blink);
                     sx += colon;
                 }
                 if !(i == 0 && *v == 0) {
-                    seg_digit(c, sx, top, dw, dh, *v, on, off);
+                    seg_digit(c, sx, y0, dw, dh, *v, on, off);
                 } else {
-                    seg_digit(c, sx, top, dw, dh, 8, off, off);
+                    seg_digit(c, sx, y0, dw, dh, 8, off, off);
                 }
                 sx += dw * 1.25;
             }
         }
-        ClockKind::ClockWeather => {
-            let tw = c.num(&time, 16.0, 12.0, 40.0, 400, c.text1());
-            c.tw(ampm(n.hour), 20.0 + tw, 34.0, 13.0, 500, c.text2(), 40.0);
-            c.tw(&date_long, 18.0, 66.0, 12.0, 400, c.text2(), c.w * 0.6);
-            if let Some(w) = x.weather {
-                c.text(weather_emoji(w.code, w.is_day), c.w - 60.0, 16.0, 28.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
-                c.tr(&format!("{:.0}°", d0(w.temp_c)), c.w - 16.0, 56.0, 20.0, 500, c.text1());
+        ClockKind::Month => match sh {
+            Shape::Mini => day_tile(c, &n, sh),
+            Shape::Dock => week_row(c, &n, 6.0, 4.0, c.w - 12.0, c.h - 8.0),
+            Shape::Medium => {
+                c.tw(mon, 16.0, 10.0, 13.0, 600, c.text1(), 160.0);
+                c.tr(&n.year.to_string(), c.w - 16.0, 10.0, 13.0, 600, RED);
+                week_row(c, &n, 14.0, 32.0, c.w - 28.0, c.h - 40.0);
             }
-        }
-        ClockKind::Month => {
-            let pad = 14.0;
-            c.tw(MONTHS[n.month as usize - 1], pad + 2.0, 12.0, 14.0, 600, c.text1(), 160.0);
-            c.tr(&n.year.to_string(), c.w - pad - 2.0, 12.0, 14.0, 600, RED);
-            let colw = (c.w - 2.0 * pad) / 7.0;
-            for (i, d) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
-                c.tc(d, pad + colw * (i as f32 + 0.5), 40.0, 10.5, 600, c.text3(), colw);
+            _ => {
+                let pad = if sh == Shape::Small { 10.0 } else { 14.0 };
+                let hs = if sh == Shape::Small { 11.5 } else { 14.0 };
+                c.tw(if sh == Shape::Small { &mon[..3] } else { mon }, pad + 2.0, 10.0, hs, 600, c.text1(), 160.0);
+                c.tr(&n.year.to_string(), c.w - pad - 2.0, 10.0, hs, 600, RED);
+                month_grid(c, &n, pad, 32.0, c.w - 2.0 * pad, c.h - 38.0);
             }
-            let first = n.first_weekday();
-            let rows = (first + n.days_in_month()).div_ceil(7) as f32;
-            let rh = ((c.h - 62.0 - 6.0) / rows).min(26.0);
-            for day in 1..=n.days_in_month() {
-                let idx = first + day - 1;
-                let cx = pad + colw * ((idx % 7) as f32 + 0.5);
-                let cy = 62.0 + rh * (idx / 7) as f32;
-                let today = day == n.day;
-                if today {
-                    c.circle(cx, cy + 8.0, 11.0, RED);
-                }
-                c.tc(&day.to_string(), cx, cy, 12.0, if today { 700 } else { 400 }, if today { (1.0, 1.0, 1.0, 1.0) } else { c.text1() }, colw);
-            }
-        }
+        },
     }
 }
 
@@ -845,94 +1316,6 @@ pub fn weather_emoji(code: i32, day: bool) -> &'static str {
         71..=77 | 85 | 86 => "🌨️",
         95..=99 => "⛈️",
         _ => "🌡️",
-    }
-}
-
-fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, dense: bool) {
-    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open(format!("https://www.msn.com/en-ca/weather/forecast/in-{}", x.cfg.weather_city.replace(' ', "-")))));
-    let Some(w) = x.weather else {
-        if k == WeatherKind::Banner && !dense {
-            bg(c, false);
-        }
-        if dense {
-            c.glyph(G_SUN, c.h / 2.0, c.h / 2.0, c.h * 0.4, c.text3());
-            dense_face(c, "—", &x.cfg.weather_city, c.text1());
-        } else {
-            c.tw(&x.cfg.weather_city, 16.0, 16.0, 13.0, 600, c.text1(), c.w);
-            c.tw("Fetching weather…", 16.0, 40.0, 12.0, 400, c.text2(), c.w);
-        }
-        return;
-    };
-    let city = &x.cfg.weather_city;
-    let temp = format!("{:.0}°", d0(w.temp_c));
-    let emoji = weather_emoji(w.code, w.is_day);
-    if dense {
-        c.text(emoji, c.h / 2.0, c.h * 0.2, c.h * 0.42, 400, c.text1(), Align::Center, c.h, Font::Text);
-        dense_face(c, &temp, &w.description, c.text1());
-        return;
-    }
-    match k {
-        WeatherKind::Now => {
-            c.text(emoji, 46.0, 18.0, 40.0, 400, c.text1(), Align::Center, 80.0, Font::Text);
-            c.num(&temp, 90.0, 10.0, 40.0, 300, c.text1());
-            c.tw(&format!("H:{:.0}°  L:{:.0}°", d0(w.high_c), d0(w.low_c)), 92.0, 62.0, 12.0, 400, c.text2(), 140.0);
-            c.tr(city, c.w - 16.0, 16.0, 12.5, 600, c.text1());
-            c.tr(&w.description, c.w - 16.0, 36.0, 11.5, 400, c.text2());
-        }
-        WeatherKind::Detail => {
-            c.text(emoji, 34.0, 16.0, 30.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
-            c.num(&temp, 62.0, 10.0, 34.0, 300, c.text1());
-            c.tw(&w.description, 18.0, 62.0, 12.0, 400, c.text2(), c.w * 0.5);
-            let rows = [("Feels like", format!("{:.0}°", d0(w.feels_c))), ("Humidity", format!("{:.0}%", w.humidity)), ("Wind", format!("{:.0} km/h", w.wind_kmh)), ("UV", format!("{:.0}", w.uv))];
-            for (i, (l, v)) in rows.iter().enumerate() {
-                let y = 12.0 + i as f32 * 18.0;
-                c.tw(l, c.w * 0.55, y, 11.0, 400, c.text3(), 80.0);
-                c.tr(v, c.w - 16.0, y, 11.5, 600, c.text1());
-            }
-        }
-        WeatherKind::Hourly | WeatherKind::Week => {
-            c.tw(city, 16.0, 10.0, 12.0, 600, c.text1(), c.w * 0.5);
-            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 10.0, 11.5, 400, c.text2());
-            let items: Vec<(String, &str, String)> = if k == WeatherKind::Hourly {
-                w.hourly.iter().take(6).enumerate().map(|(i, (h, t, code))| (if i == 0 { "Now".to_string() } else { format!("{}{}", h12(*h as u32), if *h < 12 { "a" } else { "p" }) }, weather_emoji(*code, (6..19).contains(h)), format!("{:.0}°", d0(*t)))).collect()
-            } else {
-                w.daily.iter().take(7).enumerate().map(|(i, (d, hi, lo, code))| (if i == 0 { "Today".to_string() } else { weekday_of(d) }, weather_emoji(*code, true), format!("{:.0}° {:.0}°", d0(*hi), d0(*lo)))).collect()
-            };
-            let n = items.len().max(1);
-            let colw = (c.w - 24.0) / n as f32;
-            for (i, (l, e, t)) in items.iter().enumerate() {
-                let cx = 12.0 + colw * (i as f32 + 0.5);
-                c.tc(l, cx, 32.0, 10.5, 500, c.text2(), colw);
-                c.text(e, cx, 47.0, 16.0, 400, c.text1(), Align::Center, colw, Font::Text);
-                c.tc(t, cx, 72.0, if k == WeatherKind::Week { 10.0 } else { 12.0 }, 600, c.text1(), colw);
-            }
-        }
-        WeatherKind::Banner => {
-            let (top, bottom) = if w.is_day { (hex(0x4A90E2), hex(0x2D6CC0)) } else { (hex(0x1B2550), hex(0x0E1430)) };
-            c.rr_grad(0.0, 0.0, c.w, c.h, 18.0, top, bottom);
-            let white = (1.0, 1.0, 1.0, 1.0);
-            c.tw(&w.description, 18.0, 18.0, 16.0, 600, white, c.w * 0.55);
-            c.tw(city, 18.0, 42.0, 12.0, 400, (1.0, 1.0, 1.0, 0.8), c.w * 0.55);
-            c.tw(&format!("H:{:.0}°  L:{:.0}°", d0(w.high_c), d0(w.low_c)), 18.0, 64.0, 11.5, 400, (1.0, 1.0, 1.0, 0.8), c.w * 0.55);
-            c.text(&temp, c.w - 70.0, 18.0, 44.0, 300, white, Align::Right, c.w, Font::Display);
-            c.text(emoji, c.w - 40.0, 44.0, 30.0, 400, white, Align::Center, 60.0, Font::Text);
-        }
-        WeatherKind::Sun => {
-            let (rise, set) = (mins(&w.sunrise), mins(&w.sunset));
-            let now_m = (x.now.hour * 60 + x.now.minute) as f32;
-            let frac = if set > rise { ((now_m - rise) / (set - rise)).clamp(0.0, 1.0) } else { 0.5 };
-            let (cx, cy, r) = (c.w / 2.0, c.h - 22.0, (c.w * 0.32).min(56.0));
-            c.arc(cx, cy, r, 2.0, 180.0, 360.0, c.ink(0.2));
-            c.arc(cx, cy, r, 2.5, 180.0, 180.0 + 180.0 * frac, ORANGE);
-            let a = (180.0 + 180.0 * frac).to_radians();
-            c.circle(cx + r * a.cos(), cy + r * a.sin(), 6.0, YELLOW);
-            c.line(16.0, cy, c.w - 16.0, cy, 1.0, c.ink(0.15));
-            c.tw(&format!("↑ {}", w.sunrise), 16.0, cy - 18.0, 11.5, 500, c.text2(), 80.0);
-            c.tr(&format!("{} ↓", w.sunset), c.w - 16.0, cy - 18.0, 11.5, 500, c.text2());
-            c.tw("Sunrise & Sunset", 16.0, 10.0, 11.5, 600, c.text2(), 140.0);
-            let left = (set - now_m).max(0.0) as u64 * 60;
-            c.tr(&if left > 0 { format!("{} of daylight left", dur(left)) } else { "After sunset".into() }, c.w - 16.0, 10.0, 11.0, 400, c.text3());
-        }
     }
 }
 
@@ -966,13 +1349,187 @@ fn weekday_of(ymd: &str) -> String {
     DAYS[wd as usize][..3].to_string()
 }
 
+/// Columns of hours or days: label, emoji, temperature.
+fn forecast_cols(c: &Canvas, items: &[(String, &'static str, String)], x0: f32, y0: f32, w: f32, small_temp: bool) {
+    let n = items.len().max(1);
+    let colw = w / n as f32;
+    for (i, (l, e, t)) in items.iter().enumerate() {
+        let cx = x0 + colw * (i as f32 + 0.5);
+        c.tc(l, cx, y0, 10.5, 500, c.text2(), colw);
+        c.text(e, cx, y0 + 15.0, 16.0, 400, c.text1(), Align::Center, colw, Font::Text);
+        c.tc(t, cx, y0 + 40.0, if small_temp { 10.0 } else { 12.0 }, 600, c.text1(), colw);
+    }
+}
+
+type Day = (String, &'static str, String, String);
+
+fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open(format!("https://www.msn.com/en-ca/weather/forecast/in-{}", x.cfg.weather_city.replace(' ', "-")))));
+    let Some(w) = x.weather else {
+        if k == WeatherKind::Banner && !matches!(sh, Shape::Mini | Shape::Dock) {
+            bg(c, false);
+        }
+        compact_or_text(c, sh, Vis::Glyph(G_SUN, c.text3()), "—", &x.cfg.weather_city, "Fetching weather…");
+        return;
+    };
+    let city = &x.cfg.weather_city;
+    let temp = format!("{:.0}°", d0(w.temp_c));
+    let emoji = weather_emoji(w.code, w.is_day);
+    let hourly: Vec<(String, &'static str, String)> = w.hourly.iter().enumerate().map(|(i, (h, t, code))| (if i == 0 { "Now".to_string() } else { format!("{}{}", h12(*h as u32), if *h < 12 { "a" } else { "p" }) }, weather_emoji(*code, (6..19).contains(h)), format!("{:.0}°", d0(*t)))).collect();
+    let daily: Vec<Day> = w.daily.iter().enumerate().map(|(i, (d, hi, lo, code))| (if i == 0 { "Today".to_string() } else { weekday_of(d) }, weather_emoji(*code, true), format!("{:.0}°", d0(*hi)), format!("{:.0}°", d0(*lo)))).collect();
+    if matches!(sh, Shape::Mini | Shape::Dock) {
+        let s = Sum::new(Vis::Emoji(emoji), temp, if sh == Shape::Dock { w.description.clone() } else { String::new() });
+        compact_sum(c, &s, sh);
+        return;
+    }
+    if sh == Shape::Small {
+        match k {
+            WeatherKind::Banner => {
+                let (top, bottom) = if w.is_day { (hex(0x4A90E2), hex(0x2D6CC0)) } else { (hex(0x1B2550), hex(0x0E1430)) };
+                c.rr_grad(0.0, 0.0, c.w, c.h, 18.0, top, bottom);
+                c.tw(city, 14.0, 14.0, 12.0, 600, WHITE, c.w - 28.0);
+                c.num(&temp, 14.0, 32.0, 34.0, 300, WHITE);
+                c.text(emoji, c.w - 30.0, 36.0, 24.0, 400, WHITE, Align::Center, 40.0, Font::Text);
+                c.tw(&w.description, 14.0, c.h - 26.0, 11.0, 500, (1.0, 1.0, 1.0, 0.85), c.w - 28.0);
+            }
+            WeatherKind::Hourly | WeatherKind::Week => {
+                c.tw(city, 12.0, 10.0, 11.5, 600, c.text1(), c.w - 50.0);
+                c.tr(&temp, c.w - 12.0, 10.0, 11.5, 500, c.text2());
+                let items: Vec<(String, &'static str, String)> = if k == WeatherKind::Hourly {
+                    hourly.iter().take(3).cloned().collect()
+                } else {
+                    daily.iter().take(3).map(|(l, e, hi, _)| (l.chars().take(3).collect(), *e, hi.clone())).collect()
+                };
+                forecast_cols(c, &items, 6.0, 40.0, c.w - 12.0, false);
+            }
+            WeatherKind::Sun => sun_arc(c, w, x, true),
+            _ => {
+                c.tw(city, 14.0, 12.0, 12.0, 600, c.text1(), c.w - 28.0);
+                c.text(emoji, 14.0, 34.0, 26.0, 400, c.text1(), Align::Left, 40.0, Font::Text);
+                c.num(&temp, 52.0, 30.0, 32.0, 300, c.text1());
+                c.tw(&w.description, 14.0, 78.0, 11.0, 400, c.text2(), c.w - 28.0);
+                c.tw(&format!("H:{:.0}° L:{:.0}°", d0(w.high_c), d0(w.low_c)), 14.0, 94.0, 10.5, 400, c.text3(), c.w - 28.0);
+            }
+        }
+        return;
+    }
+    let large = sh == Shape::Large;
+    match k {
+        WeatherKind::Now => {
+            c.text(emoji, 46.0, 18.0, 40.0, 400, c.text1(), Align::Center, 80.0, Font::Text);
+            c.num(&temp, 90.0, 10.0, 40.0, 300, c.text1());
+            c.tw(&format!("H:{:.0}°  L:{:.0}°", d0(w.high_c), d0(w.low_c)), 92.0, 62.0, 12.0, 400, c.text2(), 140.0);
+            c.tr(city, c.w - 16.0, 16.0, 12.5, 600, c.text1());
+            c.tr(&w.description, c.w - 16.0, 36.0, 11.5, 400, c.text2());
+        }
+        WeatherKind::Detail => {
+            c.text(emoji, 34.0, 16.0, 30.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
+            c.num(&temp, 62.0, 10.0, 34.0, 300, c.text1());
+            c.tw(&w.description, 18.0, 62.0, 12.0, 400, c.text2(), c.w * 0.5);
+            let rows = [("Feels like", format!("{:.0}°", d0(w.feels_c))), ("Humidity", format!("{:.0}%", w.humidity)), ("Wind", format!("{:.0} km/h", w.wind_kmh)), ("UV", format!("{:.0}", w.uv))];
+            for (i, (l, v)) in rows.iter().enumerate() {
+                let y = 12.0 + i as f32 * 18.0;
+                c.tw(l, c.w * 0.55, y, 11.0, 400, c.text3(), 80.0);
+                c.tr(v, c.w - 16.0, y, 11.5, 600, c.text1());
+            }
+        }
+        WeatherKind::Hourly => {
+            c.tw(city, 16.0, 10.0, 12.0, 600, c.text1(), c.w * 0.5);
+            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 10.0, 11.5, 400, c.text2());
+            forecast_cols(c, &hourly.iter().take(6).cloned().collect::<Vec<_>>(), 12.0, 32.0, c.w - 24.0, false);
+        }
+        WeatherKind::Week if !large => {
+            c.tw(city, 16.0, 10.0, 12.0, 600, c.text1(), c.w * 0.5);
+            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 10.0, 11.5, 400, c.text2());
+            let items: Vec<(String, &'static str, String)> = daily.iter().take(7).map(|(l, e, hi, lo)| (l.clone(), *e, format!("{hi} {lo}"))).collect();
+            forecast_cols(c, &items, 12.0, 32.0, c.w - 24.0, true);
+        }
+        WeatherKind::Week => {
+            c.tw(city, 16.0, 12.0, 12.0, 600, c.text1(), c.w * 0.5);
+            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 12.0, 11.5, 400, c.text2());
+        }
+        WeatherKind::Banner => {
+            let (top, bottom) = if w.is_day { (hex(0x4A90E2), hex(0x2D6CC0)) } else { (hex(0x1B2550), hex(0x0E1430)) };
+            c.rr_grad(0.0, 0.0, c.w, c.h, 18.0, top, bottom);
+            c.tw(&w.description, 18.0, 18.0, 16.0, 600, WHITE, c.w * 0.55);
+            c.tw(city, 18.0, 42.0, 12.0, 400, (1.0, 1.0, 1.0, 0.8), c.w * 0.55);
+            c.tw(&format!("H:{:.0}°  L:{:.0}°", d0(w.high_c), d0(w.low_c)), 18.0, 64.0, 11.5, 400, (1.0, 1.0, 1.0, 0.8), c.w * 0.55);
+            c.text(&temp, c.w - 70.0, 18.0, 44.0, 300, WHITE, Align::Right, c.w, Font::Display);
+            c.text(emoji, c.w - 40.0, 44.0, 30.0, 400, WHITE, Align::Center, 60.0, Font::Text);
+        }
+        WeatherKind::Sun => sun_arc(c, w, x, false),
+    }
+    if large && k != WeatherKind::Sun {
+        // The week underneath (for the weekly card, from the top).
+        let start = if k == WeatherKind::Week { 40.0 } else { 108.0 };
+        if k != WeatherKind::Week {
+            c.line(14.0, start - 8.0, c.w - 14.0, start - 8.0, 1.0, if k == WeatherKind::Banner { (1.0, 1.0, 1.0, 0.2) } else { c.ink(0.08) });
+        }
+        let ink = if k == WeatherKind::Banner { WHITE } else { c.text1() };
+        let n = (((c.h - start - 6.0) / 22.0).floor() as usize).min(daily.len());
+        day_rows(c, &daily[..n], start, ink);
+    }
+}
+
+/// Rows of days with a temperature range bar.
+fn day_rows(c: &Canvas, days: &[Day], start: f32, ink: Col) {
+    let t = |s: &str| s.trim_end_matches('°').parse::<f32>().unwrap_or(0.0);
+    let (lo_t, hi_t) = days.iter().fold((f32::MAX, f32::MIN), |acc, d| (acc.0.min(t(&d.3)), acc.1.max(t(&d.2))));
+    let span = (hi_t - lo_t).max(1.0);
+    for (i, (l, e, hi, lo)) in days.iter().enumerate() {
+        let y = start + i as f32 * 22.0;
+        c.tw(l, 16.0, y, 11.5, 500, ink, 60.0);
+        c.text(e, 86.0, y - 2.0, 14.0, 400, ink, Align::Center, 30.0, Font::Text);
+        c.tr(lo, 132.0, y, 11.5, 400, alpha(ink, 0.6));
+        let (bx, bw) = (142.0, c.w - 142.0 - 50.0);
+        c.rr(bx, y + 6.0, bw, 4.0, 2.0, alpha(ink, 0.12));
+        let a = bx + bw * (t(lo) - lo_t) / span;
+        let b = bx + bw * (t(hi) - lo_t) / span;
+        c.rr(a, y + 6.0, (b - a).max(4.0), 4.0, 2.0, ORANGE);
+        c.tr(hi, c.w - 16.0, y, 11.5, 600, ink);
+    }
+}
+
+fn sun_arc(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, small: bool) {
+    let (rise, set) = (mins(&w.sunrise), mins(&w.sunset));
+    let now_m = (x.now.hour * 60 + x.now.minute) as f32;
+    let frac = if set > rise { ((now_m - rise) / (set - rise)).clamp(0.0, 1.0) } else { 0.5 };
+    let bottom = if c.h > 150.0 { c.h - 40.0 } else { c.h - 22.0 };
+    let r = (c.w * 0.36).min(bottom - 30.0).min(if c.h > 150.0 { 110.0 } else { 56.0 });
+    let (cx, cy) = (c.w / 2.0, bottom);
+    c.arc(cx, cy, r, 2.0, 180.0, 360.0, c.ink(0.2));
+    c.arc(cx, cy, r, 2.5, 180.0, 180.0 + 180.0 * frac, ORANGE);
+    let a = (180.0 + 180.0 * frac).to_radians();
+    c.circle(cx + r * a.cos(), cy + r * a.sin(), 6.0, YELLOW);
+    c.line(12.0, cy, c.w - 12.0, cy, 1.0, c.ink(0.15));
+    let fs = if small { 10.0 } else { 11.5 };
+    c.tw(&format!("↑ {}", w.sunrise), 12.0, cy + 4.0, fs, 500, c.text2(), 80.0);
+    c.tr(&format!("{} ↓", w.sunset), c.w - 12.0, cy + 4.0, fs, 500, c.text2());
+    if !small {
+        c.tw("Sunrise & Sunset", 16.0, 10.0, 11.5, 600, c.text2(), 140.0);
+        let left = (set - now_m).max(0.0) as u64 * 60;
+        c.tr(&if left > 0 { format!("{} of daylight left", dur(left)) } else { "After sunset".into() }, c.w - 16.0, 10.0, 11.0, 400, c.text3());
+    }
+}
+
+/// For faces without data yet: the compact layout in the dock, a line of text in cards.
+fn compact_or_text(c: &Canvas, sh: Shape, vis: Vis, value: &str, caption: &str, text: &str) {
+    match sh {
+        Shape::Mini | Shape::Dock => compact_sum(c, &Sum::new(vis, value, caption), sh),
+        _ => {
+            c.tw(caption, 16.0, 16.0, 13.0, 600, c.text1(), c.w - 32.0);
+            c.text(text, 16.0, 40.0, 12.0, 400, c.text2(), Align::Left, c.w - 32.0, Font::Text);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ timers
 
-fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, dense: bool) {
-    let (col, label, text, running, frac) = match k {
+fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
+    let (col, label, text, running, frac, done) = match k {
         TimerKind::Stopwatch => {
             let e = x.hub.stopwatch.elapsed().as_secs_f32();
-            (ORANGE, "Stopwatch".to_string(), hms(e), x.hub.stopwatch.start.is_some(), None)
+            (ORANGE, "Stopwatch".to_string(), hms(e), x.hub.stopwatch.start.is_some(), None, false)
         }
         _ => {
             let t = &x.hub.timers[&k];
@@ -983,39 +1540,85 @@ fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, dense: bool) {
                 (TimerKind::Pomodoro, _, _) => "Break".to_string(),
                 _ => "Timer".to_string(),
             };
-            (if k == TimerKind::Pomodoro { RED } else { BLUE }, label, hms(left), t.running(), Some(1.0 - left / t.total.max(1) as f32))
+            (if k == TimerKind::Pomodoro { RED } else { BLUE }, label, hms(left), t.running(), Some(1.0 - left / t.total.max(1) as f32), t.done)
         }
     };
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Timer(k)));
-    if running || x.hub.timers.get(&k).map(|t| t.done).unwrap_or(false) {
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
+    if running || done {
         c.rr_stroke(0.0, 0.0, c.w, c.h, if dense { 12.0 } else { 18.0 }, alpha(col, 0.9), 1.6);
     }
-    if dense {
-        let r = c.h * 0.3;
-        let (cx, cy) = (c.h / 2.0, c.h / 2.0);
-        match frac {
-            Some(f) => c.ring(cx, cy, r, 3.5, f, col),
-            None => c.circle(cx, cy, r, alpha(col, 0.9)),
+    let play = if running { G_PAUSE } else { G_PLAY };
+    match sh {
+        Shape::Mini => {
+            // A ring around the time.
+            let r = c.h * 0.42;
+            c.ring(c.w / 2.0, c.h / 2.0, r, 3.0, frac.unwrap_or(if running { 1.0 } else { 0.0 }), col);
+            let fs = fit(c, &text, c.h * 0.24, 7.0, 600, Font::Display, r * 1.6);
+            c.text(&text, c.w / 2.0, c.h / 2.0 - fs * 0.68, fs, 600, c.text1(), Align::Center, r * 2.0, Font::Display);
         }
-        c.glyph(if running { G_PAUSE } else { G_PLAY }, cx, cy, r * 0.8, if frac.is_some() { col } else { (1.0, 1.0, 1.0, 1.0) });
-        dense_face(c, &text, &label, c.text1());
-        return;
+        Shape::Dock => {
+            let r = c.h * 0.3;
+            let (cx, cy) = (c.h / 2.0, c.h / 2.0);
+            match frac {
+                Some(f) => c.ring(cx, cy, r, 3.5, f, col),
+                None => c.circle(cx, cy, r, alpha(col, 0.9)),
+            }
+            c.glyph(play, cx, cy, r * 0.8, if frac.is_some() { col } else { WHITE });
+            let x0 = c.h * 0.96;
+            let vs = (c.h * 0.34).max(13.0);
+            let cs = (c.h * 0.19).max(9.5);
+            let top = (c.h - vs * 1.25 - cs * 1.3) / 2.0 - 1.0;
+            c.text(&text, x0, top, vs, 600, c.text1(), Align::Left, c.w - x0 - 6.0, Font::Display);
+            c.tw(&label, x0, top + vs * 1.25, cs, 400, c.text2(), c.w - x0 - 6.0);
+        }
+        Shape::Small => {
+            c.tw(&label, 14.0, 12.0, 11.5, 600, col, c.w - 28.0);
+            let fs = fit(c, &text, 30.0, 16.0, 400, Font::Display, c.w - 28.0);
+            c.text(&text, 14.0, 28.0, fs, 400, c.text1(), Align::Left, c.w - 28.0, Font::Display);
+            let r = 16.0;
+            let (bx, by) = (c.w - 12.0 - r, c.h - 10.0 - r);
+            c.circle(bx, by, r, col);
+            c.glyph(play, bx, by, 13.0, WHITE);
+            let rx = bx - r - 20.0;
+            c.circle(rx, by, 13.0, c.ink(0.12));
+            c.glyph(G_RESET, rx, by, 10.0, c.text1());
+            out.hits.push(((rx - 14.0, by - 14.0, 28.0, 28.0), WAct::TimerReset(k)));
+        }
+        Shape::Medium => {
+            c.tw(&label, 18.0, 16.0, 12.0, 600, col, 140.0);
+            c.text(&text, 18.0, 34.0, 38.0, 400, c.text1(), Align::Left, c.w * 0.6, Font::Display);
+            let r = 22.0;
+            let (bx, by) = (c.w - 18.0 - r, c.h / 2.0);
+            c.circle(bx, by, r, col);
+            c.glyph(play, bx, by, 16.0, WHITE);
+            let (rx, ry) = (bx - r - 26.0, by);
+            c.circle(rx, ry, 15.0, c.ink(0.12));
+            c.glyph(G_RESET, rx, ry, 12.0, c.text1());
+            out.hits.push(((rx - 16.0, ry - 16.0, 32.0, 32.0), WAct::TimerReset(k)));
+        }
+        Shape::Large => {
+            // A big ring with the time inside, buttons under it.
+            let r = ((c.h - 70.0) / 2.0).min(c.w / 2.0 - 30.0);
+            let (cx, cy) = (c.w / 2.0, 12.0 + r);
+            c.ring(cx, cy, r, 7.0, frac.unwrap_or(0.0), col);
+            c.tc(&label, cx, cy - 34.0, 12.0, 600, col, 2.0 * r);
+            let fs = fit(c, &text, 34.0, 16.0, 400, Font::Display, 2.0 * r - 24.0);
+            c.text(&text, cx, cy - fs * 0.62, fs, 400, c.text1(), Align::Center, 2.0 * r, Font::Display);
+            let by = c.h - 26.0;
+            c.circle(cx + 26.0, by, 18.0, col);
+            c.glyph(play, cx + 26.0, by, 14.0, WHITE);
+            c.circle(cx - 26.0, by, 18.0, c.ink(0.12));
+            c.glyph(G_RESET, cx - 26.0, by, 12.0, c.text1());
+            out.hits.push(((cx - 46.0, by - 20.0, 40.0, 40.0), WAct::TimerReset(k)));
+        }
     }
-    c.tw(&label, 18.0, 16.0, 12.0, 600, col, 140.0);
-    c.text(&text, 18.0, 34.0, 38.0, 400, c.text1(), Align::Left, c.w * 0.6, Font::Display);
-    let r = 22.0;
-    let (bx, by) = (c.w - 18.0 - r, c.h / 2.0);
-    c.circle(bx, by, r, col);
-    c.glyph(if running { G_PAUSE } else { G_PLAY }, bx, by, 16.0, (1.0, 1.0, 1.0, 1.0));
-    let (rx, ry) = (bx - r - 26.0, by);
-    c.circle(rx, ry, 15.0, c.ink(0.12));
-    c.glyph(G_RESET, rx, ry, 12.0, c.text1());
-    out.hits.push(((rx - 16.0, ry - 16.0, 32.0, 32.0), WAct::TimerReset(k)));
 }
 
 // ------------------------------------------------------------------ media
 
-fn art(c: &Canvas, x: &Ctx, wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory, ax: f32, ay: f32, s: f32, r: f32) {
+#[allow(clippy::too_many_arguments)]
+fn art(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, ax: f32, ay: f32, s: f32, r: f32) {
     let src = x.hub.art_img.as_ref().map(|a| a.1.clone()).or_else(|| x.control.media.as_ref().and_then(|m| m.thumbnail_png.as_ref()).and_then(|b| load_image_bytes(wic, b)));
     match src {
         Some(img) => c.image(&img, ax, ay, s, s, r),
@@ -1026,44 +1629,57 @@ fn art(c: &Canvas, x: &Ctx, wic: &windows::Win32::Graphics::Imaging::IWICImaging
     }
 }
 
-fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &windows::Win32::Graphics::Imaging::IWICImagingFactory, dense: bool) {
+fn controls(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, gap: f32, playing: bool) {
+    for (i, (g, a)) in [(G_PREV, WAct::MediaPrev), (if playing { G_PAUSE } else { G_PLAY }, WAct::MediaPlay), (G_NEXT, WAct::MediaNext)].into_iter().enumerate() {
+        let x = cx + (i as f32 - 1.0) * gap;
+        c.glyph(g, x, cy, if i == 1 { 18.0 } else { 14.0 }, c.text1());
+        out.hits.push(((x - 16.0, cy - 16.0, 32.0, 32.0), a));
+    }
+}
+
+fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImagingFactory, sh: Shape) {
     let m = x.control.media.as_ref();
     let (title, artist, playing) = match m {
         Some(m) => (m.title.clone(), m.artist.clone(), m.playing),
         None => ("Nothing playing".to_string(), String::new(), false),
     };
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
     match k {
         MediaKind::Output => {
             let vol = x.control.volume.unwrap_or(0.0);
             let muted = x.control.muted == Some(true);
+            let g = if muted { G_MUTE } else { G_VOL };
+            let pct = format!("{:.0}%", vol * 100.0);
+            let dev = x.hub.output_name.clone().unwrap_or_else(|| "Sound".into());
             if dense {
-                c.glyph(if muted { G_MUTE } else { G_VOL }, c.h / 2.0, c.h / 2.0, c.h * 0.36, c.text1());
-                dense_face(c, &format!("{:.0}%", vol * 100.0), x.hub.output_name.as_deref().unwrap_or("Sound"), c.text1());
+                let mut s = Sum::new(Vis::Glyph(g, c.text1()), pct, dev);
+                s.meter = Some((vol, BLUE));
+                compact_sum(c, &s, sh);
                 out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mute));
                 return;
             }
-            c.glyph(if muted { G_MUTE } else { G_VOL }, 26.0, 26.0, 16.0, c.text1());
+            let small = sh == Shape::Small;
+            c.glyph(g, 26.0, 26.0, 16.0, c.text1());
             out.hits.push(((10.0, 10.0, 32.0, 32.0), WAct::Mute));
-            c.tw(x.hub.output_name.as_deref().unwrap_or("Sound"), 46.0, 17.0, 12.5, 600, c.text1(), c.w - 110.0);
-            c.tr(&format!("{:.0}%", vol * 100.0), c.w - 16.0, 17.0, 12.0, 500, c.text2());
-            let (bx, by, bw, bh) = (16.0, 52.0, c.w - 32.0, 24.0);
+            c.tw(if small { "Sound" } else { &dev }, 46.0, 17.0, 12.5, 600, c.text1(), c.w - 100.0);
+            c.tr(&pct, c.w - 16.0, 17.0, 12.0, 500, c.text2());
+            let (bx, bw, bh) = (16.0, c.w - 32.0, 24.0);
+            let by = if sh == Shape::Large { c.h / 2.0 - bh / 2.0 } else { c.h - bh - 16.0 };
             c.rr(bx, by, bw, bh, bh / 2.0, c.ink(0.12));
             c.rr(bx, by, (bw * vol).max(bh), bh, bh / 2.0, if muted { c.ink(0.3) } else { BLUE });
             out.hits.push(((bx, by - 4.0, bw, bh + 8.0), WAct::Volume));
+            if small {
+                c.tw(&dev, 16.0, 48.0, 10.5, 400, c.text3(), c.w - 32.0);
+            }
             return;
         }
         MediaKind::Mic => {
             let muted = x.hub.mic_muted == Some(true);
-            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mic));
-            let s = c.h.min(c.w);
-            let (cx, cy) = (c.w / 2.0, if dense { c.h / 2.0 } else { c.h / 2.0 - 8.0 });
-            c.circle(cx, cy, s * 0.3, if muted { alpha(RED, 0.9) } else { c.ink(0.12) });
-            c.glyph(G_MIC, cx, cy, s * 0.24, if muted { (1.0, 1.0, 1.0, 1.0) } else { c.text1() });
+            tile_sub(c, out, G_MIC, "Microphone", if muted { "Muted" } else { "On" }, muted, RED, WAct::Mic, dense);
             if muted {
-                c.line(cx - s * 0.14, cy - s * 0.14, cx + s * 0.14, cy + s * 0.14, 2.0, (1.0, 1.0, 1.0, 1.0));
-            }
-            if !dense {
-                c.tc(if muted { "Microphone muted" } else { "Microphone on" }, cx, c.h - 24.0, 11.5, 500, c.text2(), c.w);
+                // A slash across the plate's microphone.
+                let (cx, cy, s) = plate_center(c, dense);
+                c.line(cx - s * 0.2, cy - s * 0.2, cx + s * 0.2, cy + s * 0.2, 2.0, WHITE);
             }
             return;
         }
@@ -1071,144 +1687,223 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &windows::Wi
     }
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::MediaPlay));
     if m.is_none() {
-        if dense && k == MediaKind::Disc {
-            bg(c, true);
+        if !dense && k == MediaKind::Disc {
+            bg(c, false);
         }
-        if dense {
-            c.glyph(G_MUSIC, c.h / 2.0, c.h / 2.0, c.h * 0.36, c.text3());
-            if k != MediaKind::Disc {
-                dense_face(c, "Not playing", "Media", c.text2());
-            }
-        } else {
-            if k == MediaKind::Disc {
-                bg(c, false);
-            }
-            c.glyph(G_MUSIC, 40.0, c.h / 2.0, 22.0, c.text3());
-            c.tw("Nothing playing", 70.0, c.h / 2.0 - 10.0, 13.0, 500, c.text2(), c.w - 90.0);
+        compact_or_text(c, sh, Vis::Glyph(G_MUSIC, c.text3()), if sh == Shape::Mini { "" } else { "Not playing" }, "Nothing playing", "Play something in any app to control it here.");
+        return;
+    }
+    if k == MediaKind::Disc {
+        if !dense {
+            bg(c, false);
+        }
+        let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
+        let (ax, ay) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
+        art(c, x, wic, ax, ay, s, s / 2.0);
+        c.circle(c.w / 2.0, c.h / 2.0, s * 0.1, (0.1, 0.1, 0.12, 1.0));
+        c.circle_stroke(c.w / 2.0, c.h / 2.0, s / 2.0 - 0.5, (1.0, 1.0, 1.0, 0.2), 1.0);
+        if !playing {
+            c.glyph(G_PLAY, c.w / 2.0, c.h / 2.0, s * 0.12, WHITE);
         }
         return;
     }
-    match k {
-        MediaKind::Disc => {
-            if !dense {
-                bg(c, false);
-            }
-            let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
-            let (ax, ay) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
-            art(c, x, wic, ax, ay, s, s / 2.0);
-            c.circle(c.w / 2.0, c.h / 2.0, s * 0.1, (0.1, 0.1, 0.12, 1.0));
-            c.circle_stroke(c.w / 2.0, c.h / 2.0, s / 2.0 - 0.5, (1.0, 1.0, 1.0, 0.2), 1.0);
+    match sh {
+        Shape::Mini => {
+            let s = c.h - 8.0;
+            art(c, x, wic, (c.w - s) / 2.0, 4.0, s, 9.0);
             if !playing {
-                c.glyph(G_PLAY, c.w / 2.0, c.h / 2.0, s * 0.12, (1.0, 1.0, 1.0, 1.0));
+                c.glyph(G_PLAY, c.w / 2.0, c.h / 2.0, s * 0.3, WHITE);
             }
         }
-        _ if dense => {
+        Shape::Dock => {
             let s = c.h - 10.0;
             art(c, x, wic, 5.0, 5.0, s, 8.0);
             let tx = s + 12.0;
-            c.tw(&title, tx, c.h * 0.16, (c.h * 0.24).max(10.5), 600, c.text1(), c.w - tx - 6.0);
-            c.tw(&artist, tx, c.h * 0.52, (c.h * 0.2).max(9.5), 400, c.text2(), c.w - tx - 6.0);
+            let room = if c.w > c.h * 3.2 { c.w - tx - 34.0 } else { c.w - tx - 6.0 };
+            c.tw(&title, tx, c.h * 0.16, (c.h * 0.24).max(10.5), 600, c.text1(), room);
+            c.tw(&artist, tx, c.h * 0.52, (c.h * 0.2).max(9.5), 400, c.text2(), room);
+            if c.w > c.h * 3.2 {
+                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 18.0, c.h / 2.0, 13.0, c.text1());
+            }
         }
-        MediaKind::Full => {
-            art(c, x, wic, 14.0, 14.0, 68.0, 12.0);
-            c.tw(&title, 94.0, 16.0, 13.5, 600, c.text1(), c.w - 108.0);
-            c.tw(&artist, 94.0, 36.0, 11.5, 400, c.text2(), c.w - 108.0);
+        Shape::Small => {
+            art(c, x, wic, 14.0, 14.0, 44.0, 9.0);
+            c.tw(&title, 14.0, 64.0, 12.5, 600, c.text1(), c.w - 28.0);
+            c.tw(&artist, 14.0, 80.0, 10.5, 400, c.text2(), c.w - 28.0);
+            if k == MediaKind::Full {
+                out.hits.clear();
+                // The tile itself plays/pauses; the buttons along the bottom do the rest.
+                out.hits.push(((0.0, 0.0, c.w, c.h - 26.0), WAct::MediaPlay));
+                controls(c, out, c.w / 2.0, c.h - 12.0, 34.0, playing);
+            } else {
+                c.circle(c.w - 30.0, 36.0, 15.0, c.ink(0.12));
+                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 30.0, 36.0, 12.0, c.text1());
+            }
+        }
+        Shape::Large => {
+            let s = (c.h - 74.0).min(c.w * 0.5);
+            art(c, x, wic, 16.0, 16.0, s, 14.0);
+            let tx = 16.0 + s + 14.0;
+            c.text(&title, tx, 20.0, 15.0, 600, c.text1(), Align::Left, c.w - tx - 14.0, Font::Text);
+            c.tw(&artist, tx, 44.0, 12.0, 400, c.text2(), c.w - tx - 14.0);
             out.hits.clear();
-            let by = 70.0;
-            let xs = [104.0, 140.0, 176.0];
-            for (i, (g, a)) in [(G_PREV, WAct::MediaPrev), (if playing { G_PAUSE } else { G_PLAY }, WAct::MediaPlay), (G_NEXT, WAct::MediaNext)].into_iter().enumerate() {
-                c.glyph(g, xs[i], by, if i == 1 { 18.0 } else { 14.0 }, c.text1());
-                out.hits.push(((xs[i] - 16.0, by - 16.0, 32.0, 32.0), a));
+            controls(c, out, c.w / 2.0, c.h - 28.0, 54.0, playing);
+        }
+        Shape::Medium => match k {
+            MediaKind::Full => {
+                art(c, x, wic, 14.0, 14.0, 68.0, 12.0);
+                c.tw(&title, 94.0, 16.0, 13.5, 600, c.text1(), c.w - 108.0);
+                c.tw(&artist, 94.0, 36.0, 11.5, 400, c.text2(), c.w - 108.0);
+                out.hits.clear();
+                controls(c, out, 140.0, 70.0, 36.0, playing);
             }
-        }
-        MediaKind::Compact => {
-            art(c, x, wic, 16.0, (c.h - 48.0) / 2.0, 48.0, 10.0);
-            c.tw(&title, 76.0, c.h / 2.0 - 18.0, 13.0, 600, c.text1(), c.w - 140.0);
-            c.tw(&artist, 76.0, c.h / 2.0 + 2.0, 11.5, 400, c.text2(), c.w - 140.0);
-            c.circle(c.w - 36.0, c.h / 2.0, 18.0, c.ink(0.12));
-            c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 36.0, c.h / 2.0, 14.0, c.text1());
-        }
-        MediaKind::Bar => {
-            art(c, x, wic, 16.0, 14.0, 40.0, 8.0);
-            c.tw(&title, 66.0, 15.0, 13.0, 600, c.text1(), c.w - 120.0);
-            c.tw(&artist, 66.0, 34.0, 11.5, 400, c.text2(), c.w - 120.0);
-            c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 30.0, 34.0, 16.0, c.text1());
-            // Level meter that sways while playing.
-            let n = 28;
-            let bw = (c.w - 32.0) / n as f32;
-            for i in 0..n {
-                let ph = (x.now.second * 7 + i * 13) % 17;
-                let hgt = if playing { 3.0 + ph as f32 * 0.9 } else { 3.0 };
-                c.rr(16.0 + i as f32 * bw, c.h - 12.0 - hgt, bw * 0.6, hgt, 1.5, if playing { alpha(PURPLE, 0.85) } else { c.ink(0.2) });
+            MediaKind::Compact => {
+                art(c, x, wic, 16.0, (c.h - 48.0) / 2.0, 48.0, 10.0);
+                c.tw(&title, 76.0, c.h / 2.0 - 18.0, 13.0, 600, c.text1(), c.w - 140.0);
+                c.tw(&artist, 76.0, c.h / 2.0 + 2.0, 11.5, 400, c.text2(), c.w - 140.0);
+                c.circle(c.w - 36.0, c.h / 2.0, 18.0, c.ink(0.12));
+                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 36.0, c.h / 2.0, 14.0, c.text1());
             }
-        }
-        _ => {}
+            _ => {
+                art(c, x, wic, 16.0, 14.0, 40.0, 8.0);
+                c.tw(&title, 66.0, 15.0, 13.0, 600, c.text1(), c.w - 120.0);
+                c.tw(&artist, 66.0, 34.0, 11.5, 400, c.text2(), c.w - 120.0);
+                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 30.0, 34.0, 16.0, c.text1());
+                // A level meter that sways while playing.
+                let n = 28;
+                let bw = (c.w - 32.0) / n as f32;
+                for i in 0..n {
+                    let ph = (x.now.second * 7 + i * 13) % 17;
+                    let hgt = if playing { 3.0 + ph as f32 * 0.9 } else { 3.0 };
+                    c.rr(16.0 + i as f32 * bw, c.h - 12.0 - hgt, bw * 0.6, hgt, 1.5, if playing { alpha(PURPLE, 0.85) } else { c.ink(0.2) });
+                }
+            }
+        },
     }
 }
 
 // ------------------------------------------------------------------ system
 
-fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, dense: bool) {
+fn rate(bps: f64) -> String {
+    if bps >= 1_000_000.0 {
+        format!("{:.1} MB/s", bps / 1_000_000.0)
+    } else {
+        format!("{:.0} KB/s", bps / 1000.0)
+    }
+}
+
+/// A ring face (CPU, memory, battery, disk) at every size.
+#[allow(clippy::too_many_arguments)]
+fn ring_face(c: &Canvas, sh: Shape, frac: f32, col: Col, big: &str, label: &str, sub: &str, series: Option<Vec<f64>>) {
+    match sh {
+        Shape::Mini => compact_sum(c, &Sum::new(Vis::Ring(frac, col, big.to_string()), "", ""), sh),
+        Shape::Dock => compact_sum(c, &Sum::new(Vis::Ring(frac, col, String::new()), big, label), sh),
+        Shape::Small => {
+            let r = 30.0;
+            c.ring(c.w / 2.0, 14.0 + r, r - 4.0, 7.0, frac, col);
+            c.tc(big, c.w / 2.0, 14.0 + r - 9.0, 13.5, 600, c.text1(), 2.0 * r);
+            c.tc(label, c.w / 2.0, 82.0, 12.5, 600, c.text1(), c.w - 16.0);
+            c.tc(sub, c.w / 2.0, 99.0, 10.5, 400, c.text2(), c.w - 16.0);
+        }
+        _ => {
+            let big_card = sh == Shape::Large;
+            let r = if big_card { 44.0 } else { 30.0 };
+            let (cx, cy) = (18.0 + r, if big_card { 16.0 + r } else { c.h / 2.0 });
+            c.ring(cx, cy, r, if big_card { 9.0 } else { 7.0 }, frac, col);
+            c.tc(big, cx, cy - if big_card { 11.0 } else { 9.0 }, if big_card { 17.0 } else { 13.5 }, 600, c.text1(), 2.0 * r);
+            let tx = cx + r + 18.0;
+            c.tw(label, tx, cy - 22.0, 13.0, 600, c.text1(), c.w - tx - 14.0);
+            c.tw(sub, tx, cy - 2.0, 11.5, 400, c.text2(), c.w - tx - 14.0);
+            if let Some(sv) = series.filter(|s| s.len() > 2) {
+                if big_card {
+                    c.area(14.0, 2.0 * r + 34.0, c.w - 28.0, c.h - 2.0 * r - 48.0, &sv, col, true);
+                } else {
+                    c.area(tx, 60.0, c.w - tx - 16.0, 22.0, &sv, col, true);
+                }
+            }
+        }
+    }
+}
+
+fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
     let st = x.stats;
     let cpu = st.map(|s| s.cpu_percent).unwrap_or(0.0);
     let (mu, mt) = st.map(|s| (s.mem_used_gb, s.mem_total_gb)).unwrap_or((0.0, 0.0));
     let memf = if mt > 0.0 { mu / mt } else { 0.0 };
-    match k {
-        SysKind::Resource | SysKind::Cpu | SysKind::Memory => {
-            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("taskmgr".into())));
-        }
-        _ => {}
+    if matches!(k, SysKind::Resource | SysKind::Cpu | SysKind::Memory | SysKind::Network) {
+        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("taskmgr".into())));
     }
-    let ring_face = |c: &Canvas, frac: f32, col: Col, big: &str, label: &str, sub: &str, series: Option<Vec<f64>>| {
-        if dense {
-            c.ring(c.h / 2.0, c.h / 2.0, c.h * 0.3, 4.0, frac, col);
-            dense_face(c, big, label, c.text1());
-            return;
-        }
-        c.ring(48.0, c.h / 2.0, 30.0, 7.0, frac, col);
-        c.tc(big, 48.0, c.h / 2.0 - 9.0, 13.5, 600, c.text1(), 60.0);
-        c.tw(label, 96.0, 20.0, 13.0, 600, c.text1(), c.w - 110.0);
-        c.tw(sub, 96.0, 40.0, 11.5, 400, c.text2(), c.w - 110.0);
-        if let Some(sv) = series {
-            c.area(96.0, 60.0, c.w - 112.0, 22.0, &sv, col, true);
-        }
-    };
+    let cpu_hist: Vec<f64> = x.hub.cpu_hist.iter().map(|v| *v as f64).collect();
     match k {
-        SysKind::Resource => {
-            if dense {
-                c.ring(c.h / 2.0, c.h / 2.0, c.h * 0.3, 4.0, cpu / 100.0, BLUE);
+        SysKind::Resource => match sh {
+            Shape::Mini => compact_sum(c, &Sum::new(Vis::Ring(cpu / 100.0, BLUE, format!("{cpu:.0}")), "", ""), sh),
+            Shape::Dock => {
+                let r = c.h * 0.3;
+                c.ring(c.h / 2.0, c.h / 2.0, r, 4.0, cpu / 100.0, BLUE);
                 let tx = c.h;
-                c.tw(&format!("CPU {cpu:.0}%"), tx, c.h * 0.18, (c.h * 0.22).max(10.0), 600, c.text1(), c.w - tx);
-                c.tw(&format!("RAM {:.0}%", memf * 100.0), tx, c.h * 0.52, (c.h * 0.22).max(10.0), 600, c.text2(), c.w - tx);
-                return;
+                let fs = (c.h * 0.22).max(10.0);
+                c.tw(&format!("CPU {cpu:.0}%"), tx, c.h * 0.2, fs, 600, c.text1(), c.w - tx - 6.0);
+                c.tw(&format!("RAM {:.0}%", memf * 100.0), tx, c.h * 0.54, fs, 600, c.text2(), c.w - tx - 6.0);
             }
-            c.ring(48.0, c.h / 2.0, 30.0, 7.0, cpu / 100.0, GREEN);
-            c.tc(&format!("{cpu:.0}%"), 48.0, c.h / 2.0 - 14.0, 13.5, 600, c.text1(), 60.0);
-            c.tc("CPU", 48.0, c.h / 2.0 + 3.0, 9.5, 600, c.text3(), 60.0);
-            for (i, (l, f, v, col)) in [("CPU", cpu / 100.0, format!("{cpu:.0}%"), BLUE), ("MEM", memf, format!("{:.0}%", memf * 100.0), PURPLE)].iter().enumerate() {
-                let y = 26.0 + i as f32 * 26.0;
-                c.tw(l, 96.0, y, 11.0, 600, c.text2(), 40.0);
-                c.bar(132.0, y + 5.0, c.w - 132.0 - 56.0, 5.0, *f, *col);
-                c.tr(v, c.w - 16.0, y, 12.0, 600, c.text1());
+            Shape::Small => {
+                let r = 28.0;
+                c.ring(c.w / 2.0, 12.0 + r, r - 4.0, 7.0, cpu / 100.0, GREEN);
+                c.tc(&format!("{cpu:.0}%"), c.w / 2.0, 12.0 + r - 15.0, 13.0, 600, c.text1(), 2.0 * r);
+                c.tc("CPU", c.w / 2.0, 12.0 + r + 1.0, 9.0, 600, c.text3(), 2.0 * r);
+                let y = 82.0;
+                c.tw("MEM", 14.0, y, 10.5, 600, c.text2(), 40.0);
+                c.bar(48.0, y + 5.0, c.w - 48.0 - 46.0, 5.0, memf, PURPLE);
+                c.tr(&format!("{:.0}%", memf * 100.0), c.w - 14.0, y, 11.0, 600, c.text1());
             }
-        }
-        SysKind::Cpu => ring_face(c, cpu / 100.0, BLUE, &format!("{cpu:.0}%"), "CPU", "Processor load", Some(x.hub.cpu_hist.iter().map(|v| *v as f64).collect())),
-        SysKind::Memory => ring_face(c, memf, PURPLE, &format!("{:.0}%", memf * 100.0), "Memory", &format!("{mu:.1} of {mt:.0} GB"), None),
+            _ => {
+                c.ring(48.0, 48.0, 30.0, 7.0, cpu / 100.0, GREEN);
+                c.tc(&format!("{cpu:.0}%"), 48.0, 48.0 - 14.0, 13.5, 600, c.text1(), 60.0);
+                c.tc("CPU", 48.0, 48.0 + 3.0, 9.5, 600, c.text3(), 60.0);
+                for (i, (l, f, v, col)) in [("CPU", cpu / 100.0, format!("{cpu:.0}%"), BLUE), ("MEM", memf, format!("{:.0}%", memf * 100.0), PURPLE)].iter().enumerate() {
+                    let y = 26.0 + i as f32 * 26.0;
+                    c.tw(l, 96.0, y, 11.0, 600, c.text2(), 40.0);
+                    c.bar(132.0, y + 5.0, c.w - 132.0 - 56.0, 5.0, *f, *col);
+                    c.tr(v, c.w - 16.0, y, 12.0, 600, c.text1());
+                }
+                if sh == Shape::Large {
+                    c.tw(&format!("{mu:.1} of {mt:.0} GB memory in use"), 16.0, 98.0, 11.0, 400, c.text3(), c.w - 32.0);
+                    c.area(14.0, 120.0, c.w - 28.0, c.h - 134.0, &cpu_hist, BLUE, true);
+                }
+            }
+        },
+        SysKind::Cpu => ring_face(c, sh, cpu / 100.0, BLUE, &format!("{cpu:.0}%"), "CPU", "Processor load", Some(cpu_hist)),
+        SysKind::Memory => ring_face(c, sh, memf, PURPLE, &format!("{:.0}%", memf * 100.0), "Memory", &format!("{mu:.1} of {mt:.0} GB"), None),
         SysKind::Network => {
             let (d, u) = st.map(|s| (s.net_down_bps, s.net_up_bps)).unwrap_or((0.0, 0.0));
-            if dense {
-                let s = (c.h * 0.24).max(10.0);
-                c.tw(&format!("↓ {}", rate(d)), 10.0, c.h * 0.16, s, 600, BLUE, c.w);
-                c.tw(&format!("↑ {}", rate(u)), 10.0, c.h * 0.52, s, 600, GREEN, c.w);
-                return;
-            }
-            c.tw("Network", 16.0, 12.0, 12.0, 600, c.text2(), 100.0);
-            c.tw(&format!("↓ {}", rate(d)), 16.0, 32.0, 15.0, 600, BLUE, c.w / 2.0);
-            c.tw(&format!("↑ {}", rate(u)), c.w / 2.0, 32.0, 15.0, 600, GREEN, c.w / 2.0 - 16.0);
             let down: Vec<f64> = x.hub.net_hist.iter().map(|v| v.0).collect();
             let up: Vec<f64> = x.hub.net_hist.iter().map(|v| v.1).collect();
-            c.area(16.0, 58.0, c.w - 32.0, 26.0, &down, BLUE, true);
-            c.area(16.0, 58.0, c.w - 32.0, 26.0, &up, GREEN, false);
+            let short = |b: f64| rate(b).replace(" KB/s", "K").replace(" MB/s", "M");
+            match sh {
+                Shape::Mini => {
+                    let fs = (c.h * 0.2).max(8.0);
+                    c.tc(&format!("↓{}", short(d)), c.w / 2.0, c.h * 0.18, fs, 600, BLUE, c.w);
+                    c.tc(&format!("↑{}", short(u)), c.w / 2.0, c.h * 0.54, fs, 600, GREEN, c.w);
+                }
+                Shape::Dock => {
+                    let s = (c.h * 0.24).max(10.0);
+                    c.tw(&format!("↓ {}", rate(d)), 10.0, c.h * 0.16, s, 600, BLUE, c.w);
+                    c.tw(&format!("↑ {}", rate(u)), 10.0, c.h * 0.52, s, 600, GREEN, c.w);
+                }
+                Shape::Small => {
+                    c.tw("Network", 14.0, 12.0, 11.5, 600, c.text2(), 100.0);
+                    c.tw(&format!("↓ {}", rate(d)), 14.0, 32.0, 14.0, 600, BLUE, c.w - 28.0);
+                    c.tw(&format!("↑ {}", rate(u)), 14.0, 52.0, 14.0, 600, GREEN, c.w - 28.0);
+                    c.area(14.0, 80.0, c.w - 28.0, c.h - 92.0, &down, BLUE, true);
+                }
+                _ => {
+                    c.tw("Network", 16.0, 12.0, 12.0, 600, c.text2(), 100.0);
+                    c.tw(&format!("↓ {}", rate(d)), 16.0, 32.0, 15.0, 600, BLUE, c.w / 2.0);
+                    c.tw(&format!("↑ {}", rate(u)), c.w / 2.0, 32.0, 15.0, 600, GREEN, c.w / 2.0 - 16.0);
+                    let gh = c.h - 70.0;
+                    c.area(16.0, 58.0, c.w - 32.0, gh, &down, BLUE, true);
+                    c.area(16.0, 58.0, c.w - 32.0, gh, &up, GREEN, false);
+                }
+            }
         }
         SysKind::Battery | SysKind::Disk | SysKind::Storage | SysKind::Language | SysKind::Uptime => {
             let conn = match k {
@@ -1219,87 +1914,103 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, dense: bool) {
             };
             let badge = super::canvas::gly(G_PLUG, 0x2C2C34, 0x30D158);
             let g = got(x, conn);
-            if let Got::Feed(f) = g {
-                match k {
-                    SysKind::Battery => {
-                        let charging = f.extra.get("charging").map(|v| v == "true").unwrap_or(false);
-                        let frac = f.frac.unwrap_or(0.0);
-                        let col = if frac < 0.2 && !charging { RED } else { GREEN };
-                        let sub = if charging { "Charging".to_string() } else { f.extra.get("time_left").cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| "On battery".into()) };
-                        ring_face(c, frac, col, &format!("{:.0}%", frac * 100.0), "Battery", &sub, None);
-                    }
-                    SysKind::Disk => {
-                        let used = f.frac.unwrap_or(0.0);
-                        ring_face(c, used, ORANGE, &format!("{:.0}%", used * 100.0), "Disk C:", &format!("{} GB free", compact(f.value.unwrap_or(0.0))), None);
-                        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:storagesense".into())));
-                    }
-                    SysKind::Storage => {
-                        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:storagesense".into())));
-                        let used = f.frac.unwrap_or(0.0);
-                        let total = f.rows.first().map(|r| r.value.clone()).unwrap_or_default();
-                        if dense {
-                            c.glyph("\u{EDA2}", c.h / 2.0, c.h / 2.0, c.h * 0.36, c.text2());
-                            dense_face(c, &format!("{:.0} GB", f.value.unwrap_or(0.0)), "Free on C:", c.text1());
-                            return;
-                        }
-                        c.num(&format!("{:.1} GB", f.value.unwrap_or(0.0)), 16.0, 14.0, 28.0, 600, c.text1());
-                        c.tr("Free on C:", c.w - 16.0, 22.0, 12.0, 400, c.text2());
-                        c.bar(16.0, 58.0, c.w - 32.0, 8.0, used, if used > 0.9 { RED } else { BLUE });
-                        c.tw(&total, 16.0, 72.0, 11.0, 400, c.text3(), c.w - 32.0);
-                    }
-                    SysKind::Language => {
-                        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Language));
-                        let code = f.text.clone().unwrap_or_else(|| "—".into());
-                        if dense {
-                            c.text(&code, c.w / 2.0, c.h / 2.0 - c.h * 0.2, c.h * 0.3, 700, c.text1(), Align::Center, c.w, Font::Display);
-                            return;
-                        }
-                        c.glyph(G_KEYBOARD, 34.0, c.h / 2.0, 22.0, c.text2());
-                        c.num(&code, 64.0, 18.0, 28.0, 700, c.text1());
-                        c.tw(&f.caption, 64.0, 58.0, 12.0, 400, c.text2(), c.w - 80.0);
-                    }
-                    _ => {
-                        let t = f.text.clone().unwrap_or_else(|| headline(&f));
-                        if dense {
-                            c.glyph(G_CLOCK, c.h / 2.0, c.h / 2.0, c.h * 0.36, c.text2());
-                            dense_face(c, &t, "Uptime", c.text1());
-                            return;
-                        }
-                        c.glyph(G_CLOCK, 34.0, c.h / 2.0, 22.0, c.text2());
-                        c.num(&t, 64.0, 20.0, 26.0, 600, c.text1());
-                        c.tw("Since Windows started", 64.0, 58.0, 12.0, 400, c.text2(), c.w - 80.0);
-                    }
-                }
-            } else {
-                placeholder(c, out, match k {
+            let Got::Feed(f) = g else {
+                let name = match k {
                     SysKind::Battery => "Battery",
                     SysKind::Language => "Keyboard Language",
                     SysKind::Uptime => "Uptime",
                     _ => "Storage",
-                }, &badge, conn, &g, dense);
+                };
+                placeholder(c, out, name, &badge, conn, &g, sh);
+                return;
+            };
+            match k {
+                SysKind::Battery => {
+                    let charging = f.extra.get("charging").map(|v| v == "true").unwrap_or(false);
+                    let frac = f.frac.unwrap_or(0.0);
+                    let col = if frac < 0.2 && !charging { RED } else { GREEN };
+                    let sub = if charging { "Charging".to_string() } else { f.extra.get("time_left").cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| "On battery".into()) };
+                    ring_face(c, sh, frac, col, &format!("{:.0}%", frac * 100.0), "Battery", &sub, None);
+                }
+                SysKind::Disk => {
+                    let used = f.frac.unwrap_or(0.0);
+                    ring_face(c, sh, used, ORANGE, &format!("{:.0}%", used * 100.0), "Disk C:", &format!("{} GB free", compact(f.value.unwrap_or(0.0))), None);
+                    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:storagesense".into())));
+                }
+                SysKind::Storage => {
+                    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:storagesense".into())));
+                    let used = f.frac.unwrap_or(0.0);
+                    if compactish(sh) {
+                        let mut s = Sum::new(Vis::Glyph(G_DRIVE, c.text2()), format!("{:.0} GB", f.value.unwrap_or(0.0)), "Free on C:");
+                        s.meter = Some((used, if used > 0.9 { RED } else { BLUE }));
+                        compact_sum(c, &s, sh);
+                        return;
+                    }
+                    c.num(&format!("{:.1} GB", f.value.unwrap_or(0.0)), 16.0, 14.0, 28.0, 600, c.text1());
+                    c.tr("Free on C:", c.w - 16.0, 22.0, 12.0, 400, c.text2());
+                    c.bar(16.0, 58.0, c.w - 32.0, 8.0, used, if used > 0.9 { RED } else { BLUE });
+                    if sh == Shape::Large {
+                        details(c, &f, 88.0, BLUE);
+                    } else {
+                        let total = f.rows.first().map(|r| r.value.clone()).unwrap_or_default();
+                        c.tw(&total, 16.0, 72.0, 11.0, 400, c.text3(), c.w - 32.0);
+                    }
+                }
+                SysKind::Language => {
+                    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Language));
+                    let code = f.text.clone().unwrap_or_else(|| "—".into());
+                    match sh {
+                        Shape::Mini | Shape::Dock => {
+                            let fs = fit(c, &code, c.h * 0.36, 9.0, 700, Font::Display, c.w - 8.0);
+                            c.text(&code, c.w / 2.0, (c.h - fs * 1.3) / 2.0, fs, 700, c.text1(), Align::Center, c.w, Font::Display);
+                        }
+                        Shape::Small => {
+                            c.glyph(G_KEYBOARD, 30.0, 30.0, 20.0, c.text2());
+                            c.num(&code, 14.0, 52.0, 28.0, 700, c.text1());
+                            c.tw(&f.caption, 14.0, 92.0, 10.5, 400, c.text2(), c.w - 28.0);
+                        }
+                        _ => {
+                            c.glyph(G_KEYBOARD, 34.0, c.h / 2.0, 22.0, c.text2());
+                            c.num(&code, 64.0, c.h / 2.0 - 30.0, 28.0, 700, c.text1());
+                            c.tw(&f.caption, 64.0, c.h / 2.0 + 10.0, 12.0, 400, c.text2(), c.w - 80.0);
+                        }
+                    }
+                }
+                _ => {
+                    let t = f.text.clone().unwrap_or_else(|| headline(&f));
+                    if compactish(sh) {
+                        compact_sum(c, &Sum::new(Vis::Glyph(G_CLOCK, c.text2()), t, "Uptime"), sh);
+                        return;
+                    }
+                    c.glyph(G_CLOCK, 34.0, c.h / 2.0, 22.0, c.text2());
+                    c.num(&t, 64.0, c.h / 2.0 - 28.0, 26.0, 600, c.text1());
+                    c.tw("Since Windows started", 64.0, c.h / 2.0 + 10.0, 12.0, 400, c.text2(), c.w - 80.0);
+                }
             }
         }
         SysKind::Brightness => {
             let b = x.hub.brightness;
-            if dense {
-                c.glyph(G_SUN, c.h / 2.0, c.h / 2.0, c.h * 0.36, c.text1());
-                dense_face(c, &b.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_else(|| "—".into()), "Brightness", c.text1());
+            if matches!(sh, Shape::Mini | Shape::Dock) || (sh == Shape::Small && b.is_none()) {
+                let mut s = Sum::new(Vis::Glyph(G_SUN, c.text1()), b.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_else(|| "—".into()), "Brightness");
+                s.meter = b.map(|v| (v, YELLOW));
+                compact_sum(c, &s, sh);
                 out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:display".into())));
                 return;
             }
             c.glyph(G_SUN, 26.0, 26.0, 16.0, c.text1());
-            c.tw("Brightness", 46.0, 17.0, 12.5, 600, c.text1(), c.w - 110.0);
+            c.tw("Brightness", 46.0, 17.0, 12.5, 600, c.text1(), c.w - 100.0);
             match b {
                 Some(v) => {
                     c.tr(&format!("{:.0}%", v * 100.0), c.w - 16.0, 17.0, 12.0, 500, c.text2());
-                    let (bx, by, bw, bh) = (16.0, 52.0, c.w - 32.0, 24.0);
+                    let (bx, bw, bh) = (16.0, c.w - 32.0, 24.0);
+                    let by = if sh == Shape::Large { c.h / 2.0 - bh / 2.0 } else { c.h - bh - 16.0 };
                     c.rr(bx, by, bw, bh, bh / 2.0, c.ink(0.12));
                     c.rr(bx, by, (bw * v).max(bh), bh, bh / 2.0, (1.0, 1.0, 1.0, 0.95));
                     c.glyph(G_SUN, bx + 14.0, by + bh / 2.0, 11.0, (0.1, 0.1, 0.12, 0.85));
                     out.hits.push(((bx, by - 4.0, bw, bh + 8.0), WAct::Brightness));
                 }
                 None => {
-                    c.tw("This monitor doesn't report its brightness (DDC/CI). Click for Display settings.", 16.0, 48.0, 11.0, 400, c.text3(), c.w - 32.0);
+                    c.text("This monitor doesn't report its brightness (DDC/CI). Click for Display settings.", 16.0, 48.0, 11.0, 400, c.text3(), Align::Left, c.w - 32.0, Font::Text);
                     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:display".into())));
                 }
             }
@@ -1307,41 +2018,86 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, dense: bool) {
     }
 }
 
-fn rate(bps: f64) -> String {
-    if bps >= 1_000_000.0 {
-        format!("{:.1} MB/s", bps / 1_000_000.0)
-    } else {
-        format!("{:.0} KB/s", bps / 1000.0)
-    }
-}
-
 // ------------------------------------------------------------------ tools
 
-fn tile(c: &Canvas, out: &mut Painted, g: &str, label: &str, on: bool, col: Col, act: WAct, dense: bool) {
-    out.hits.push(((0.0, 0.0, c.w, c.h), act));
-    let s = c.h.min(c.w);
-    let (cx, cy) = (c.w / 2.0, if dense { c.h / 2.0 } else { c.h / 2.0 - 9.0 });
-    let r = if dense { s * 0.32 } else { 26.0 };
-    c.circle(cx, cy, r, if on { col } else { c.ink(0.10) });
-    if g.chars().next().map(|ch| ch as u32 >= 0xE000 && (ch as u32) < 0xF900).unwrap_or(false) {
-        c.glyph(g, cx, cy, r * 0.8, if on { (1.0, 1.0, 1.0, 1.0) } else { c.text1() });
+/// Where a tile's plate sits (centre and size), to draw on top of it.
+fn plate_center(c: &Canvas, dense: bool) -> (f32, f32, f32) {
+    if dense {
+        let p = (c.h * 0.62).round();
+        if c.w > c.h * 1.5 {
+            (c.h / 2.0, c.h / 2.0, p)
+        } else {
+            (c.w / 2.0, c.h / 2.0, p)
+        }
+    } else if c.w >= 180.0 {
+        (18.0 + 24.0, c.h / 2.0, 48.0)
     } else {
-        c.text(g, cx, cy - r * 0.62, r * 0.9, 400, c.text1(), Align::Center, r * 2.0, Font::Text);
-    }
-    if !dense {
-        c.tc(label, cx, c.h - 24.0, 11.5, 500, c.text2(), c.w);
+        let p = 52.0;
+        (c.w / 2.0, (c.h - p - 26.0) / 2.0 + p / 2.0, p)
     }
 }
 
-fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, dense: bool) {
+/// A control tile: a rounded-square plate with an icon (filled with `col` when on), and
+/// its name. Wide cards put the name beside the plate; small ones under it; the dock
+/// shows the plate alone (with the name when it's wider).
+#[allow(clippy::too_many_arguments)]
+fn tile(c: &Canvas, out: &mut Painted, g: &str, label: &str, on: bool, col: Col, act: WAct, dense: bool) {
+    tile_sub(c, out, g, label, "", on, col, act, dense);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tile_sub(c: &Canvas, out: &mut Painted, g: &str, label: &str, sub: &str, on: bool, col: Col, act: WAct, dense: bool) {
+    out.hits.push(((0.0, 0.0, c.w, c.h), act));
+    let plate_fill = if on { col } else { c.ink(0.12) };
+    let ink = if on { WHITE } else { c.text1() };
+    let (cx, cy, p) = plate_center(c, dense);
+    plate(c, g, cx - p / 2.0, cy - p / 2.0, p, plate_fill, ink);
+    if dense {
+        if c.w > c.h * 1.5 && !label.is_empty() {
+            let tx = c.h * 0.96;
+            let fs = (c.h * 0.24).max(10.5);
+            let two = !sub.is_empty();
+            c.tw(label, tx, c.h / 2.0 - if two { fs * 1.25 } else { fs * 0.68 }, fs, 600, c.text1(), c.w - tx - 6.0);
+            if two {
+                c.tw(sub, tx, c.h / 2.0 + 1.0, fs * 0.82, 400, c.text2(), c.w - tx - 6.0);
+            }
+        }
+        return;
+    }
+    if c.w >= 180.0 {
+        let tx = cx + p / 2.0 + 14.0;
+        let sub = if sub.is_empty() && on { "On" } else { sub };
+        let ty = if sub.is_empty() { c.h / 2.0 - 10.0 } else { c.h / 2.0 - 19.0 };
+        c.tw(label, tx, ty, 14.0, 600, c.text1(), c.w - tx - 14.0);
+        if !sub.is_empty() {
+            c.tw(sub, tx, ty + 21.0, 11.5, 400, c.text2(), c.w - tx - 14.0);
+        }
+        return;
+    }
+    c.tc(label, c.w / 2.0, cy + p / 2.0 + 9.0, 11.5, 600, c.text2(), c.w - 12.0);
+}
+
+/// The icon plate used by tiles.
+fn plate(c: &Canvas, g: &str, x: f32, y: f32, p: f32, fill: Col, ink: Col) {
+    c.rr(x, y, p, p, p * 0.3, fill);
+    c.glyph(g, x + p / 2.0, y + p / 2.0, p * 0.42, ink);
+}
+
+fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
     match k {
-        ToolKind::Tray => tile(c, out, G_UP, "Background apps", false, BLUE, WAct::Launchpad, dense),
-        ToolKind::DarkMode => tile(c, out, G_MOON, if x.control.dark { "Dark mode on" } else { "Dark mode off" }, x.control.dark, hex(0x5E5CE6), WAct::Dark, dense),
-        ToolKind::Focus => tile(c, out, G_MOON, "Focus", false, hex(0x5E5CE6), WAct::Open("ms-settings:quiethours".into()), dense),
+        ToolKind::Tray => tray(c, out, x, sh),
+        ToolKind::Connectivity => connectivity(c, out, x, sh),
+        ToolKind::ControlTiles => control_tiles(c, out, x, sh),
+        ToolKind::Toggles => toggles(c, out, x, sh),
+        ToolKind::WinSettings => tile(c, out, G_SETTINGS, "Windows Settings", false, BLUE, WAct::Open("ms-settings:".into()), dense),
+        ToolKind::WinUpdate => win_update(c, out, x, sh),
+        ToolKind::DarkMode => tile_sub(c, out, G_MOON, "Dark mode", if x.control.dark { "On" } else { "Off" }, x.control.dark, hex(0x5E5CE6), WAct::Dark, dense),
+        ToolKind::Focus => tile(c, out, G_DND, "Focus", false, hex(0x5E5CE6), WAct::Open("ms-settings:quiethours".into()), dense),
         ToolKind::Notifications => tile(c, out, G_BELL, "Notifications", false, BLUE, WAct::Open("ms-actioncenter:".into()), dense),
         ToolKind::ShowDesktop => tile(c, out, G_DESKTOP, "Show desktop", x.hub.desktop_shown, BLUE, WAct::ShowDesktop, dense),
-        ToolKind::KeepAwake => tile(c, out, "☕", if x.hub.keep_awake { "Staying awake" } else { "Keep awake" }, x.hub.keep_awake, ORANGE, WAct::KeepAwake, dense),
-        ToolKind::Search if dense => tile(c, out, G_SEARCH, "Search", false, BLUE, WAct::Search, dense),
+        ToolKind::KeepAwake => tile_sub(c, out, G_COFFEE, "Keep awake", if x.hub.keep_awake { "PC stays awake" } else { "Off" }, x.hub.keep_awake, ORANGE, WAct::KeepAwake, dense),
+        ToolKind::Search if !matches!(sh, Shape::Medium | Shape::Large) => tile(c, out, G_SEARCH, "Search", false, BLUE, WAct::Search, dense),
         ToolKind::Search => {
             out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Search));
             c.rr(16.0, c.h / 2.0 - 20.0, c.w - 32.0, 40.0, 20.0, c.ink(0.10));
@@ -1352,84 +2108,82 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, dense: bool) {
         ToolKind::Trash => tile(c, out, G_TRASH, "Recycle Bin", false, BLUE, WAct::Open("shell:RecycleBinFolder".into()), dense),
         ToolKind::WhatsApp => {
             let att = x.whatsapp == Some(true);
-            tile(c, out, G_CHAT, if att { "New messages" } else if x.whatsapp.is_some() { "WhatsApp" } else { "Open WhatsApp" }, true, hex(0x25D366), WAct::WhatsApp, dense);
+            tile_sub(c, out, G_CHAT, "WhatsApp", if att { "New messages" } else if x.whatsapp.is_some() { "Open" } else { "Not running" }, true, hex(0x25D366), WAct::WhatsApp, dense);
             if att {
-                let s = c.h.min(c.w);
-                c.circle(c.w / 2.0 + s * 0.24, if dense { c.h * 0.22 } else { c.h / 2.0 - 30.0 }, if dense { s * 0.1 } else { 7.0 }, RED);
-            }
-        }
-        ToolKind::Toggles => {
-            let ctl = x.control;
-            let items = [
-                (G_WIFI, ctl.wifi == Some(true), WAct::Wifi),
-                (G_BT, ctl.bluetooth == Some(true), WAct::Bluetooth),
-                (G_MOON, ctl.dark, WAct::Dark),
-                (if ctl.muted == Some(true) { G_MUTE } else { G_VOL }, ctl.muted == Some(true), WAct::Mute),
-            ];
-            let n = items.len() as f32;
-            let slot = c.w / n;
-            let r = if dense { c.h * 0.3 } else { 20.0 };
-            for (i, (g, on, a)) in items.into_iter().enumerate() {
-                let cx = slot * (i as f32 + 0.5);
-                let cy = c.h / 2.0;
-                c.circle(cx, cy, r, if on { BLUE } else { c.ink(0.10) });
-                c.glyph(g, cx, cy, r * 0.75, if on { (1.0, 1.0, 1.0, 1.0) } else { c.text1() });
-                out.hits.push(((cx - slot / 2.0, 0.0, slot, c.h), a));
+                let (cx, cy, p) = plate_center(c, dense);
+                c.circle(cx + p * 0.42, cy - p * 0.42, (p * 0.13).max(4.0), RED);
             }
         }
         ToolKind::Screenshot => {
             let items = [("\u{F407}", "Region", "ms-screenclip:?clippingMode=Rectangle", BLUE), ("\u{E737}", "Window", "ms-screenclip:?clippingMode=Window", GREEN), ("\u{E740}", "Screen", "ms-screenclip:?clippingMode=Fullscreen", PURPLE)];
-            let slot = c.w / 3.0;
-            for (i, (g, l, uri, col)) in items.into_iter().enumerate() {
+            let n = if sh == Shape::Mini { 1 } else { 3 };
+            let slot = c.w / n as f32;
+            for (i, (g, l, uri, col)) in items.into_iter().take(n).enumerate() {
                 let cx = slot * (i as f32 + 0.5);
-                let s = if dense { c.h * 0.6 } else { 42.0 };
+                let s = if dense { (c.h * 0.62).min(slot - 6.0) } else { (slot - 14.0).min(42.0) };
                 let cy = if dense { c.h / 2.0 } else { c.h / 2.0 - 8.0 };
                 c.rr(cx - s / 2.0, cy - s / 2.0, s, s, s * 0.28, alpha(col, 0.22));
                 c.glyph(g, cx, cy, s * 0.42, col);
                 if !dense {
-                    c.tc(l, cx, c.h - 22.0, 11.0, 500, c.text2(), slot);
+                    c.tc(l, cx, cy + s / 2.0 + 6.0, 10.5, 500, c.text2(), slot);
                 }
                 out.hits.push(((cx - slot / 2.0, 0.0, slot, c.h), WAct::Open(uri.into())));
             }
         }
         ToolKind::Apps => {
-            let ids: Vec<&String> = x.pinned.iter().take(if dense { 4 } else { 7 }).collect();
+            let max = match sh {
+                Shape::Mini => 1,
+                Shape::Dock => ((c.w - 8.0) / (c.h - 8.0)).floor().max(1.0) as usize,
+                Shape::Small => 4,
+                Shape::Medium => 6,
+                Shape::Large => 12,
+            };
+            let ids: Vec<&String> = x.pinned.iter().take(max).collect();
             if ids.is_empty() {
-                c.tw("Pin apps in Launchpad to see them here", 16.0, c.h / 2.0 - 8.0, 12.0, 400, c.text3(), c.w - 32.0);
+                c.text("Pin apps in Launchpad to see them here", 14.0, c.h / 2.0 - 8.0, 11.5, 400, c.text3(), Align::Left, c.w - 28.0, Font::Text);
                 return;
             }
-            let n = ids.len() as f32;
-            let s = if dense { (c.h - 14.0).min((c.w - 8.0) / n - 6.0) } else { ((c.w - 24.0) / n - 8.0).min(40.0) };
-            let slot = (c.w - 12.0) / n;
+            let cols = match sh {
+                Shape::Small => 2,
+                Shape::Large => 4,
+                _ => ids.len(),
+            };
+            let rows = ids.len().div_ceil(cols);
+            let labels = matches!(sh, Shape::Medium | Shape::Large);
+            let cw = (c.w - 12.0) / cols as f32;
+            let ch = (c.h - 8.0) / rows as f32;
+            let s = if dense { c.h - 12.0 } else { (cw - 14.0).min(ch - if labels { 22.0 } else { 10.0 }).min(46.0) };
             for (i, id) in ids.iter().enumerate() {
-                let cx = 6.0 + slot * (i as f32 + 0.5);
-                let y = (c.h - s) / 2.0 - if dense { 0.0 } else { 6.0 };
-                out.icons.push((cx - s / 2.0, y, s, (*id).clone()));
-                out.hits.push(((cx - slot / 2.0, 0.0, slot, c.h), WAct::App((*id).clone())));
-                if !dense {
+                let (col, row) = (i % cols, i / cols);
+                let cx = 6.0 + cw * (col as f32 + 0.5);
+                let cy = 4.0 + ch * row as f32 + (ch - s - if labels { 16.0 } else { 0.0 }) / 2.0;
+                out.icons.push((cx - s / 2.0, cy, s, (*id).clone()));
+                out.hits.push(((cx - cw / 2.0, 4.0 + ch * row as f32, cw, ch), WAct::App((*id).clone())));
+                if labels {
                     let name = x.names.get(*id).cloned().unwrap_or_default();
-                    c.tc(&name, cx, y + s + 4.0, 9.5, 400, c.text2(), slot - 2.0);
+                    c.tc(&name, cx, cy + s + 4.0, 9.5, 400, c.text2(), cw - 2.0);
                 }
             }
         }
         ToolKind::Notes => {
             out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Notes));
-            let lines: Vec<&str> = x.hub.notes.lines().filter(|l| !l.trim().is_empty()).take(4).collect();
+            let lines: Vec<&str> = x.hub.notes.lines().filter(|l| !l.trim().is_empty()).collect();
             if dense {
-                c.rr(c.h * 0.2, c.h * 0.2, c.h * 0.6, c.h * 0.6, 6.0, YELLOW);
-                c.glyph(G_NOTE, c.h / 2.0, c.h / 2.0, c.h * 0.3, (0.2, 0.2, 0.2, 1.0));
-                dense_face(c, lines.first().copied().unwrap_or("Notes"), &format!("{} lines", x.hub.notes.lines().count()), c.text1());
+                let s = Sum::new(Vis::Glyph(G_NOTE, YELLOW), if sh == Shape::Mini { String::new() } else { lines.first().copied().unwrap_or("Notes").to_string() }, format!("{} lines", lines.len()));
+                compact_sum(c, &s, sh);
                 return;
             }
-            c.rr(14.0, 14.0, 30.0, 30.0, 8.0, YELLOW);
-            c.glyph(G_NOTE, 29.0, 29.0, 14.0, (0.2, 0.2, 0.2, 1.0));
+            c.rr(14.0, 14.0, 28.0, 28.0, 8.0, YELLOW);
+            c.glyph(G_NOTE, 28.0, 28.0, 13.0, (0.2, 0.2, 0.2, 1.0));
+            let (tx, top) = if sh == Shape::Small { (14.0, 52.0) } else { (52.0, 14.0) };
+            let n = (((c.h - top - 8.0) / 17.0).floor() as usize).max(1);
             if lines.is_empty() {
-                c.tw("Notes", 54.0, 14.0, 13.0, 600, c.text1(), c.w);
-                c.tw("Click to write a note.", 54.0, 34.0, 11.5, 400, c.text2(), c.w - 70.0);
+                c.tw("Notes", tx, top, 13.0, 600, c.text1(), c.w - tx - 14.0);
+                c.text("Click to write a note.", tx, top + 20.0, 11.0, 400, c.text2(), Align::Left, c.w - tx - 14.0, Font::Text);
             } else {
-                c.tw(lines[0], 54.0, 14.0, 13.0, 600, c.text1(), c.w - 70.0);
-                for (i, l) in lines.iter().skip(1).take(3).enumerate() {
-                    c.tw(l, 54.0, 34.0 + i as f32 * 17.0, 11.5, 400, c.text2(), c.w - 70.0);
+                c.tw(lines[0], tx, top, 13.0, 600, c.text1(), c.w - tx - 14.0);
+                for (i, l) in lines.iter().skip(1).take(n.saturating_sub(1)).enumerate() {
+                    c.tw(l, tx, top + 20.0 + i as f32 * 17.0, 11.0, 400, c.text2(), c.w - tx - 14.0);
                 }
             }
         }
@@ -1438,52 +2192,239 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, dense: bool) {
             let mut apps: Vec<(&String, &u64)> = x.hub.screen.apps.iter().collect();
             apps.sort_by(|a, b| b.1.cmp(a.1));
             if dense {
-                c.glyph("\u{E7F4}", c.h / 2.0, c.h / 2.0, c.h * 0.34, BLUE);
-                dense_face(c, &dur(total), apps.first().map(|a| a.0.as_str()).unwrap_or("Screen time"), c.text1());
+                compact_sum(c, &Sum::new(Vis::Glyph(G_SCREEN, BLUE), dur(total), apps.first().map(|a| a.0.as_str()).unwrap_or("Screen time")), sh);
                 return;
             }
-            c.tw("Screen Time", 16.0, 12.0, 11.5, 600, c.text2(), 120.0);
-            c.num(&dur(total), 16.0, 28.0, 26.0, 600, c.text1());
-            let cols = [BLUE, PURPLE, ORANGE];
-            for (i, (name, secs)) in apps.iter().take(3).enumerate() {
-                let y = 16.0 + i as f32 * 24.0;
-                let x0 = c.w * 0.45;
+            c.tw("Screen Time", 14.0, 12.0, 11.5, 600, c.text2(), 120.0);
+            c.num(&dur(total), 14.0, 28.0, 26.0, 600, c.text1());
+            let cols = [BLUE, PURPLE, ORANGE, GREEN, YELLOW, RED];
+            let (x0, y0, n) = match sh {
+                Shape::Small => (14.0, 66.0, 2),
+                Shape::Large => (14.0, 76.0, 5),
+                _ => (c.w * 0.45, 16.0, 3),
+            };
+            for (i, (name, secs)) in apps.iter().take(n).enumerate() {
+                let y = y0 + i as f32 * 24.0;
                 c.tw(name, x0, y, 11.0, 500, c.text1(), c.w - x0 - 60.0);
-                c.tr(&dur(**secs), c.w - 16.0, y, 11.0, 400, c.text2());
-                c.bar(x0, y + 16.0, c.w - x0 - 16.0, 3.0, if total > 0 { **secs as f32 / total as f32 } else { 0.0 }, cols[i]);
+                c.tr(&dur(**secs), c.w - 14.0, y, 11.0, 400, c.text2());
+                c.bar(x0, y + 16.0, c.w - x0 - 14.0, 3.0, if total > 0 { **secs as f32 / total as f32 } else { 0.0 }, cols[i % cols.len()]);
             }
-            if apps.is_empty() {
-                c.tw("Counting from now", 16.0, 66.0, 11.0, 400, c.text3(), c.w);
+            if apps.is_empty() && sh != Shape::Small {
+                c.tw("Counting from now", 14.0, 66.0, 11.0, 400, c.text3(), c.w);
             }
         }
         ToolKind::Timeline => {
             let hours = &x.hub.screen.hours;
             let vals: Vec<f64> = (0..24).map(|h| *hours.get(h).unwrap_or(&0) as f64).collect();
+            if sh == Shape::Mini {
+                compact_sum(c, &Sum::new(Vis::Glyph(G_CLOCK, BLUE), dur(x.hub.screen.total()), ""), sh);
+                return;
+            }
             let (top, bot) = if dense { (6.0, 6.0) } else { (32.0, 22.0) };
             if !dense {
-                c.tw("Day Timeline", 16.0, 10.0, 11.5, 600, c.text2(), 120.0);
-                c.tr(&dur(x.hub.screen.total()), c.w - 16.0, 10.0, 11.5, 500, c.text1());
+                c.tw("Day Timeline", 14.0, 10.0, 11.5, 600, c.text2(), 120.0);
+                c.tr(&dur(x.hub.screen.total()), c.w - 14.0, 10.0, 11.5, 500, c.text1());
             }
-            let w = c.w - 32.0;
+            let w = c.w - 28.0;
             let slot = w / 24.0;
             let hi = vals.iter().cloned().fold(60.0, f64::max);
             for (h, v) in vals.iter().enumerate() {
                 let ht = ((v / hi) as f32 * (c.h - top - bot)).max(2.0);
                 let col = if h as u32 == x.now.hour { BLUE } else if *v > 0.0 { alpha(BLUE, 0.55) } else { c.ink(0.1) };
-                c.rr(16.0 + slot * h as f32 + slot * 0.15, c.h - bot - ht, slot * 0.7, ht, 1.5, col);
+                c.rr(14.0 + slot * h as f32 + slot * 0.15, c.h - bot - ht, slot * 0.7, ht, 1.5, col);
             }
             if !dense {
-                for (h, l) in [(0, "12a"), (6, "6a"), (12, "12p"), (18, "6p")] {
-                    c.tw(l, 16.0 + slot * h as f32, c.h - 18.0, 9.5, 400, c.text3(), 40.0);
+                let marks: &[(usize, &str)] = if sh == Shape::Small { &[(0, "12a"), (12, "12p")] } else { &[(0, "12a"), (6, "6a"), (12, "12p"), (18, "6p")] };
+                for (h, l) in marks {
+                    c.tw(l, 14.0 + slot * *h as f32, c.h - 18.0, 9.5, 400, c.text3(), 40.0);
                 }
             }
         }
     }
 }
 
+// ------------------------------------------------------------------ Control Center
+
+fn round_toggle(c: &Canvas, cx: f32, cy: f32, r: f32, g: &str, on: bool) {
+    c.circle(cx, cy, r, if on { BLUE } else { c.ink(0.12) });
+    c.glyph(g, cx, cy, r * 0.8, if on { WHITE } else { c.text1() });
+}
+
+/// Wi-Fi and Bluetooth: the round button switches the radio; the name opens its list.
+fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    let ctl = x.control;
+    let rows = [
+        (G_WIFI, "Wi-Fi", ctl.wifi, WAct::Wifi, WAct::WifiMenu),
+        (G_BT, "Bluetooth", ctl.bluetooth, WAct::Bluetooth, WAct::Open("ms-settings:bluetooth".into())),
+    ];
+    if matches!(sh, Shape::Mini | Shape::Dock) {
+        let slot = c.w / 2.0;
+        for (i, (g, _, on, act, _)) in rows.into_iter().enumerate() {
+            let cx = slot * (i as f32 + 0.5);
+            round_toggle(c, cx, c.h / 2.0, (c.h * 0.32).min(slot * 0.42), g, on == Some(true));
+            out.hits.push(((slot * i as f32, 0.0, slot, c.h), act));
+        }
+        return;
+    }
+    let rh = (c.h - 16.0) / rows.len() as f32;
+    let r = if sh == Shape::Large { 22.0 } else { 18.0 };
+    for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
+        let cy = 8.0 + rh * (i as f32 + 0.5);
+        let cx = 14.0 + r;
+        round_toggle(c, cx, cy, r, g, on == Some(true));
+        let tx = cx + r + 10.0;
+        let state = match on {
+            Some(true) => "On",
+            Some(false) => "Off",
+            None => "Unavailable",
+        };
+        c.tw(name, tx, cy - 17.0, 12.5, 600, c.text1(), c.w - tx - 22.0);
+        c.tw(state, tx, cy + 1.0, 11.0, 400, c.text2(), c.w - tx - 22.0);
+        c.glyph(G_CHEV, c.w - 14.0, cy, 9.0, c.text3());
+        out.hits.push(((tx - 4.0, cy - rh / 2.0, c.w - tx + 4.0, rh), more));
+        if on.is_some() {
+            out.hits.push(((cx - r - 4.0, cy - r - 4.0, 2.0 * r + 8.0, 2.0 * r + 8.0), act));
+        }
+    }
+}
+
+/// A grid of control buttons, 2 or 4 across.
+fn button_grid(c: &Canvas, out: &mut Painted, items: Vec<(&'static str, &'static str, bool, WAct)>, sh: Shape) {
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
+    if sh == Shape::Mini {
+        // Just the first one.
+        if let Some((g, _, on, act)) = items.into_iter().next() {
+            tile(c, out, g, "", on, BLUE, act, true);
+        }
+        return;
+    }
+    let cols = if sh == Shape::Small { 2 } else { items.len().min(4) };
+    let rows = items.len().div_ceil(cols);
+    let pad = if dense { 4.0 } else { 10.0 };
+    let gap = if dense { 4.0 } else { 8.0 };
+    let tw = (c.w - 2.0 * pad - gap * (cols - 1) as f32) / cols as f32;
+    let th = (c.h - 2.0 * pad - gap * (rows - 1) as f32) / rows as f32;
+    for (i, (g, label, on, act)) in items.into_iter().enumerate() {
+        let (tx, ty) = (pad + (i % cols) as f32 * (tw + gap), pad + (i / cols) as f32 * (th + gap));
+        c.rr(tx, ty, tw, th, (th.min(tw) * 0.28).min(16.0), if on { BLUE } else { c.ink(0.08) });
+        let ink = if on { WHITE } else { c.text1() };
+        if dense || th < 50.0 {
+            c.glyph(g, tx + tw / 2.0, ty + th / 2.0, (th.min(tw) * 0.42).min(18.0), ink);
+        } else {
+            c.glyph(g, tx + tw / 2.0, ty + th * 0.4, 18.0, ink);
+            c.tc(label, tx + tw / 2.0, ty + th * 0.4 + 16.0, 10.5, 500, if on { (1.0, 1.0, 1.0, 0.9) } else { c.text2() }, tw);
+        }
+        out.hits.push(((tx, ty, tw, th), act));
+    }
+}
+
+/// Dark mode, mute, snip and lock.
+fn control_tiles(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    let ctl = x.control;
+    let items = vec![
+        (G_MOON, "Dark mode", ctl.dark, WAct::Dark),
+        (if ctl.muted == Some(true) { G_MUTE } else { G_VOL }, "Mute", ctl.muted == Some(true), WAct::Mute),
+        (G_SNIP, "Snip", false, WAct::Snip),
+        (G_LOCK, "Lock", false, WAct::Lock),
+    ];
+    button_grid(c, out, items, sh);
+}
+
+/// Wi-Fi, Bluetooth, dark mode and mute.
+fn toggles(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    let ctl = x.control;
+    let items = vec![
+        (G_WIFI, "Wi-Fi", ctl.wifi == Some(true), WAct::Wifi),
+        (G_BT, "Bluetooth", ctl.bluetooth == Some(true), WAct::Bluetooth),
+        (G_MOON, "Dark mode", ctl.dark, WAct::Dark),
+        (if ctl.muted == Some(true) { G_MUTE } else { G_VOL }, "Mute", ctl.muted == Some(true), WAct::Mute),
+    ];
+    button_grid(c, out, items, sh);
+}
+
+/// Background Apps: the tray icons in a grid (the host draws the pictures).
+fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    let n = x.tray.len();
+    if matches!(sh, Shape::Mini | Shape::Dock) {
+        let s = (c.h * 0.42).round();
+        let slot = s + 6.0;
+        let fit_n = (((c.w - 8.0) / slot).floor() as usize).max(1).min(n);
+        for (i, (key, _)) in x.tray.iter().take(fit_n).enumerate() {
+            let ix = (c.w - fit_n as f32 * slot) / 2.0 + i as f32 * slot + 3.0;
+            out.icons.push((ix, (c.h - s) / 2.0, s, format!("tray:{key}")));
+            out.hits.push(((ix - 3.0, 0.0, slot, c.h), WAct::Tray(*key)));
+        }
+        if n == 0 {
+            c.glyph(G_UP, c.w / 2.0, c.h / 2.0, c.h * 0.3, c.text2());
+        }
+        return;
+    }
+    let pad = 14.0;
+    c.tw("Background Apps", pad, 12.0, 12.5, 600, c.text1(), c.w - 60.0);
+    c.tr(&n.to_string(), c.w - pad, 13.0, 11.5, 400, c.text3());
+    let head = 36.0;
+    let foot = if sh == Shape::Small { 6.0 } else { 24.0 };
+    let cols = ((c.w - 2.0 * pad) / 40.0).floor().max(1.0) as usize;
+    let tile_w = (c.w - 2.0 * pad) / cols as f32;
+    let rows = (((c.h - head - foot) / tile_w).floor() as usize).max(1);
+    let isz = (tile_w * 0.5).min(22.0);
+    for (i, (key, _)) in x.tray.iter().take(cols * rows).enumerate() {
+        let (tx, ty) = (pad + (i % cols) as f32 * tile_w, head + (i / cols) as f32 * tile_w);
+        if x.hover_tray == Some(*key) {
+            c.rr(tx + 2.0, ty + 2.0, tile_w - 4.0, tile_w - 4.0, 10.0, c.ink(0.10));
+        }
+        out.icons.push((tx + (tile_w - isz) / 2.0, ty + (tile_w - isz) / 2.0, isz, format!("tray:{key}")));
+        out.hits.push(((tx, ty, tile_w, tile_w), WAct::Tray(*key)));
+    }
+    if sh != Shape::Small {
+        let hint = match x.hover_tray.and_then(|k| x.tray.iter().find(|t| t.0 == k)) {
+            Some((_, tip)) if !tip.is_empty() => tip.lines().next().unwrap_or("").to_string(),
+            _ if n == 0 => "No background apps".to_string(),
+            _ => "Click to open · right-click for the app’s menu".to_string(),
+        };
+        c.tw(&hint, pad, c.h - foot + 2.0, 11.0, 400, c.text3(), c.w - 2.0 * pad);
+    }
+}
+
+fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    use laminar_sys::update::UpdateStatus as U;
+    let (sub, restart, attention) = match x.update {
+        None => ("Checking…".to_string(), false, false),
+        Some(U::RestartRequired) => ("Restart to finish installing updates".to_string(), true, true),
+        Some(U::Pending(1)) => ("1 update waiting".to_string(), false, true),
+        Some(U::Pending(n)) => (format!("{n} updates waiting"), false, true),
+        Some(U::UpToDate) => ("You’re up to date".to_string(), false, false),
+        Some(U::Unknown) => ("Status unavailable".to_string(), false, false),
+    };
+    let open = WAct::Open("ms-settings:windowsupdate".into());
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
+    if dense || sh == Shape::Small {
+        tile_sub(c, out, G_UPDATE, if restart { "Restart" } else { "Updates" }, &sub, attention, BLUE, if restart { WAct::Power } else { open }, dense);
+        if attention {
+            let (cx, cy, p) = plate_center(c, dense);
+            c.circle(cx + p * 0.42, cy - p * 0.42, (p * 0.12).max(4.0), RED);
+        }
+        return;
+    }
+    out.hits.push(((0.0, 0.0, c.w, c.h), open));
+    let p = 48.0;
+    plate(c, G_UPDATE, 18.0, (c.h - p) / 2.0, p, if attention { BLUE } else { c.ink(0.12) }, if attention { WHITE } else { c.text1() });
+    let tx = 18.0 + p + 14.0;
+    let bw = if restart { 78.0 } else { 0.0 };
+    c.tw("Windows Update", tx, c.h / 2.0 - 19.0, 14.0, 600, c.text1(), c.w - tx - bw - 20.0);
+    c.tw(&sub, tx, c.h / 2.0 + 2.0, 11.5, 400, c.text2(), c.w - tx - bw - 20.0);
+    if restart {
+        let (bx, bh) = (c.w - bw - 14.0, 28.0);
+        let by = (c.h - bh) / 2.0;
+        c.rr(bx, by, bw, bh, bh / 2.0, BLUE);
+        c.tc("Restart", bx + bw / 2.0, by + 6.0, 11.5, 600, WHITE, bw);
+        out.hits.push(((bx, by, bw, bh), WAct::Power));
+    }
+}
+
 // ------------------------------------------------------------------ progress
 
-fn progress(c: &Canvas, s: Span, x: &Ctx, dense: bool) {
+fn progress(c: &Canvas, s: Span, x: &Ctx, sh: Shape) {
     let n = x.now;
     let (total, done, label, frac) = match s {
         Span::Day => {
@@ -1502,23 +2443,36 @@ fn progress(c: &Canvas, s: Span, x: &Ctx, dense: bool) {
         Span::Month => GREEN,
         Span::Year => ORANGE,
     };
-    let (gx, gy, gw, gh) = if dense { (8.0, 8.0, c.w * 0.6, c.h - 16.0) } else { (16.0, 14.0, c.w - 32.0, c.h - 44.0) };
-    let cols = match s {
-        Span::Day => 12,
-        Span::Month => 11,
-        Span::Year => 13,
+    if sh == Shape::Mini {
+        compact_sum(c, &Sum::new(Vis::Ring(frac, col, pct), "", ""), sh);
+        return;
+    }
+    let dense = sh == Shape::Dock;
+    let (gx, gy, gw, gh) = match sh {
+        Shape::Dock => (8.0, 8.0, c.w * 0.62, c.h - 16.0),
+        Shape::Small => (12.0, 12.0, c.w - 24.0, c.h - 46.0),
+        _ => (16.0, 14.0, c.w - 32.0, c.h - 44.0),
+    };
+    let cols = match (s, sh) {
+        (Span::Day, Shape::Small) => 6,
+        (Span::Day, _) => 12,
+        (Span::Month, Shape::Small) => 7,
+        (Span::Month, _) => 11,
+        (Span::Year, Shape::Small) => 8,
+        (Span::Year, _) => 13,
     };
     let rows = total.div_ceil(cols);
     let cell = (gw / cols as f32).min(gh / rows as f32);
     let r = cell * 0.32;
+    let ox = gx + (gw - cell * cols as f32) / 2.0;
     for i in 0..total {
-        let (cx, cy) = (gx + cell * ((i % cols) as f32 + 0.5), gy + cell * ((i / cols) as f32 + 0.5));
+        let (cx, cy) = (ox + cell * ((i % cols) as f32 + 0.5), gy + cell * ((i / cols) as f32 + 0.5));
         c.circle(cx, cy, r, if i < done { col } else if i == done { alpha(col, 0.5) } else { c.ink(0.14) });
     }
     if dense {
-        c.text(&pct, c.w - 8.0, c.h / 2.0 - c.h * 0.2, c.h * 0.3, 600, c.text1(), Align::Right, c.w * 0.4, Font::Display);
+        c.text(&pct, c.w - 8.0, c.h / 2.0 - c.h * 0.2, c.h * 0.3, 600, c.text1(), Align::Right, c.w * 0.36, Font::Display);
         return;
     }
-    c.tw(label, 16.0, c.h - 24.0, 11.5, 500, c.text2(), c.w * 0.6);
-    c.tr(&pct, c.w - 16.0, c.h - 25.0, 12.5, 600, c.text1());
+    c.tw(label, gx, c.h - 24.0, 11.5, 500, c.text2(), c.w * 0.6);
+    c.tr(&pct, c.w - gx, c.h - 25.0, 12.5, 600, c.text1());
 }

@@ -93,7 +93,7 @@ impl Preview {
 
         let root = &self.popup.root;
         root.Children()?.RemoveAll()?;
-        let panel: Panel = ui::panel(c, gfx, backdrop, w, h, 16.0 * s, theme::surface(0.70), s)?;
+        let panel: Panel = ui::panel(c, gfx, backdrop, w, h, 16.0 * s, theme::surface(0.70), s, 0.42)?;
         let m = panel.margin;
 
         let (ww, wh) = ((w + 2.0 * m).ceil() as i32, (h + 2.0 * m).ceil() as i32);

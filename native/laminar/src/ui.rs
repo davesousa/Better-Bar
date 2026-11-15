@@ -82,14 +82,6 @@ pub mod theme {
             rgba(255, 255, 255, a)
         }
     }
-    /// Glyph colour for marks drawn on a solid `ink(0.92)` fill (the volume bar).
-    pub fn on_ink() -> (f32, f32, f32, f32) {
-        if light() {
-            (1.0, 1.0, 1.0, 0.95)
-        } else {
-            (0.1, 0.1, 0.12, 0.85)
-        }
-    }
     /// Glass tint for panels, menus and pop-ups.
     pub fn surface(a: f32) -> Color {
         if light() {
@@ -149,6 +141,17 @@ pub fn surface_sprite(c: &Compositor, surface: &CompositionDrawingSurface, w: f3
     Ok(s)
 }
 
+/// A sprite showing a surface stretched to w×h (for surfaces painted at a higher resolution).
+pub fn stretch_sprite(c: &Compositor, surface: &CompositionDrawingSurface, w: f32, h: f32) -> Result<SpriteVisual> {
+    let s = c.CreateSpriteVisual()?;
+    let b = c.CreateSurfaceBrushWithSurface(surface)?;
+    b.SetStretch(CompositionStretch::Fill)?;
+    b.SetBitmapInterpolationMode(CompositionBitmapInterpolationMode::Linear)?;
+    s.SetBrush(&b)?;
+    s.SetSize(v2(w, h))?;
+    Ok(s)
+}
+
 /// A text sprite. Returns (visual, width, height) in pixels.
 pub fn text(c: &Compositor, gfx: &Gfx, s: &str, style: &TextStyle) -> Result<(SpriteVisual, f32, f32)> {
     let (surface, w, h) = gfx.text(s, style)?;
@@ -198,13 +201,15 @@ pub fn panel(
     radius: f32,
     tint: Color,
     scale: f32,
+    shadow: f32,
 ) -> Result<Panel> {
     let blur = 22.0 * scale;
     let margin = (blur + 6.0 * scale).ceil();
     let root = c.CreateContainerVisual()?;
     root.SetSize(v2(w + 2.0 * margin, h + 2.0 * margin))?;
     // Shadow, slightly offset downwards.
-    let sh = gfx.shadow_surface(radius, blur, 0.42)?;
+    // `shadow` 0..1 (Settings → Glass → Panel shadow); 0.42 was the original strength.
+    let sh = gfx.shadow_surface(radius, blur, shadow.clamp(0.0, 1.0))?;
     let sb = c.CreateSurfaceBrushWithSurface(&sh)?;
     sb.SetStretch(CompositionStretch::Fill)?;
     let nine = c.CreateNineGridBrush()?;

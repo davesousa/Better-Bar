@@ -26,26 +26,14 @@ use crate::ui::{self, rgba, theme, v2, v3, Panel, Popup};
 const G_SEARCH: &str = "\u{E721}";
 const G_SETTINGS: &str = "\u{E713}";
 const G_POWER: &str = "\u{E7E8}";
-const G_WIFI: &str = "\u{E701}";
-const G_BT: &str = "\u{E702}";
-const G_DARK: &str = "\u{E708}";
-const G_VOLUME: &str = "\u{E767}";
-const G_MUTE: &str = "\u{E74F}";
-const G_PREV: &str = "\u{E892}";
-const G_PLAY: &str = "\u{E768}";
-const G_PAUSE: &str = "\u{E769}";
-const G_NEXT: &str = "\u{E893}";
 const G_LOCK: &str = "\u{E72E}";
-const G_SNIP: &str = "\u{E7C5}";
 const G_CHEV_R: &str = "\u{E76C}";
 const G_CHEV_D: &str = "\u{E70D}";
 const G_FOLDER: &str = "\u{E8B7}";
 const G_DOC: &str = "\u{E8A5}";
 const G_GLOBE: &str = "\u{E774}";
-const G_MEDIA: &str = "\u{E8D6}";
 const G_CHEV_L: &str = "\u{E76B}";
 const G_CHECK: &str = "\u{E73E}";
-const G_UPDATE: &str = "\u{E895}";
 /// Wi-Fi signal: 1, 2, 3 bars, full.
 const G_WIFI_BARS: [&str; 4] = ["\u{E872}", "\u{E873}", "\u{E874}", "\u{E701}"];
 
@@ -53,8 +41,6 @@ const G_WIFI_BARS: [&str; 4] = ["\u{E872}", "\u{E873}", "\u{E874}", "\u{E701}"];
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
     Close,
-    /// A tray icon (left click here; the dock handles right clicks).
-    Tray(u64),
     App(String),
     File(String),
     Uri(String),
@@ -75,20 +61,20 @@ pub enum Act {
     MediaPrev,
     MediaPlay,
     MediaNext,
-    Volume,
     Toggle(&'static str),
     Slider(&'static str),
     OpenConfig,
     /// Check GitHub for a newer Laminar now.
     CheckUpdates,
-    WinSettings,
     Snip,
     Lock,
     Search,
-    /// Something inside Launchpad widget card i (with the click's 0..1 position across the hit).
-    Widget(usize, crate::widgets::WAct, f32),
-    /// Launchpad widget card i itself (press to drag; right-click for its menu).
-    Card(usize),
+    /// Something inside a widget card (column, index), with the click's 0..1 position across the hit.
+    Widget(WPos, crate::widgets::WAct, f32),
+    /// A widget card itself (press and hold or drag to move it; right-click for its menu).
+    Card(WPos),
+    /// A widget preview in the gallery (drag it into a column or the dock).
+    GalleryItem(&'static str),
     /// Open the widget gallery.
     AddWidgets,
     GalleryCat(usize),
@@ -112,8 +98,8 @@ struct Hit {
     radius: f32,
     highlight: bool,
     scroll: bool,
-    /// In the left (widget) column's scrolling list.
-    left: bool,
+    /// In a widget column's scrolling list (0 left, 1 right).
+    col: Option<usize>,
 }
 
 /// A search result row.
@@ -138,7 +124,7 @@ struct Row {
     ctl: Ctl,
 }
 
-const SECTION_NAMES: [&str; 4] = ["Dock", "Glass", "Behavior", "About"];
+const SECTION_NAMES: [&str; 5] = ["Dock", "Glass", "Behavior", "About", "Widgets"];
 
 fn section_rows(i: usize) -> Vec<Row> {
     use Ctl::*;
@@ -158,6 +144,8 @@ fn section_rows(i: usize) -> Vec<Row> {
             r("edge_highlight", "Edge highlight", "The bright rim around the glass.", Slider { min: 0.0, max: 1.0, step: 0.01, unit: "%" }),
             r("match_windows_theme", "Match Windows light/dark mode", "Light glass in light mode. Off: always dark.", Toggle),
             r("extra_blur", "Extra blur", "Added to Windows' own blur (it can't go lower than that).", Slider { min: 0.0, max: 40.0, step: 1.0, unit: "px" }),
+            r("panel_shadow", "Panel shadow", "Depth under Launchpad's three panels.", Slider { min: 0.0, max: 1.0, step: 0.01, unit: "%" }),
+            r("card_shadow", "Widget shadow", "Depth under widgets and tiles.", Slider { min: 0.0, max: 1.0, step: 0.01, unit: "%" }),
         ],
         2 => vec![
             r("auto_hide", "Automatically hide the dock", "Push the pointer into the bottom edge to bring it back.", Toggle),
@@ -169,6 +157,11 @@ fn section_rows(i: usize) -> Vec<Row> {
             r("hide_windows_taskbar", "Hide the Windows taskbar", "A watchdog brings it back if Laminar exits.", Toggle),
             r("show_on_all_displays", "Show the dock on all displays", "Otherwise only on the main display.", Toggle),
             r("per_display_windows", "Each display shows only its own windows", "Pinned apps always show.", Toggle),
+        ],
+        4 => vec![
+            r("show_background_apps", "Background Apps widget", "Always in Launchpad unless turned off here.", Toggle),
+            r("show_windows_update", "Windows Update widget", "Always in Launchpad unless turned off here.", Toggle),
+            r("show_windows_settings", "Windows Settings widget", "Always in Launchpad unless turned off here.", Toggle),
         ],
         3 => vec![
             r("start_at_login", "Start Laminar when you sign in", "Installed copies only.", Toggle),
@@ -203,6 +196,11 @@ pub fn cfg_get(c: &Config, key: &str) -> f32 {
         "per_display_windows" => b(c.per_display_windows),
         "start_at_login" => b(c.start_at_login),
         "check_updates" => b(c.check_updates),
+        "panel_shadow" => c.panel_shadow,
+        "card_shadow" => c.card_shadow,
+        "show_background_apps" => b(c.show_background_apps),
+        "show_windows_update" => b(c.show_windows_update),
+        "show_windows_settings" => b(c.show_windows_settings),
         _ => 0.0,
     }
 }
@@ -231,6 +229,11 @@ pub fn cfg_set(c: &mut Config, key: &str, v: f32) {
         "hide_windows_taskbar" => c.hide_windows_taskbar = v > 0.5,
         "show_on_all_displays" => c.show_on_all_displays = v > 0.5,
         "per_display_windows" => c.per_display_windows = v > 0.5,
+        "panel_shadow" => c.panel_shadow = v,
+        "card_shadow" => c.card_shadow = v,
+        "show_background_apps" => c.show_background_apps = v > 0.5,
+        "show_windows_update" => c.show_windows_update = v > 0.5,
+        "show_windows_settings" => c.show_windows_settings = v > 0.5,
         _ => {}
     }
 }
@@ -263,6 +266,7 @@ const LAMINAR_SETTINGS: &[(&str, usize)] = &[
     ("Laminar: Glass & transparency", 1),
     ("Laminar: Auto-hide & behavior", 2),
     ("Laminar: Windows key & taskbar", 2),
+    ("Laminar: Widgets & connections", 4),
 ];
 
 /// Everything Launchpad shows, borrowed from the dock for one render.
@@ -281,6 +285,8 @@ pub struct Data<'a> {
     pub wifi: Option<&'a std::result::Result<Vec<laminar_sys::radios::WifiNetwork>, u32>>,
     /// Tray icons ("background apps"), in the order apps added them.
     pub tray: &'a [TrayView],
+    /// The same icons as (key, name), for widgets.
+    pub tray_list: &'a [(u64, String)],
     /// Widget state (feeds, timers) and whether WhatsApp wants attention.
     pub hub: &'a crate::widgets::Hub,
     pub whatsapp: Option<bool>,
@@ -330,22 +336,22 @@ pub struct Launchpad {
     caret: Option<ShapeVisual>,
     /// The right panel shows the Wi-Fi network list.
     pub wifi_open: bool,
-    /// Each tray icon's name label (shown while hovered) and the label shown otherwise.
-    tray_tips: Vec<(u64, SpriteVisual)>,
-    tray_hint: Option<SpriteVisual>,
+
     /// The centre panel shows the widget gallery (category index).
     pub gallery: Option<usize>,
     /// The centre panel shows a connector's form.
     pub form: Option<Form>,
-    /// Widget cards in the left column.
-    cards: Vec<Card>,
-    left_inner: Option<ContainerVisual>,
-    /// Window rectangle of the left column's list, its scroll offset and content height.
-    left_view: (f32, f32, f32, f32),
-    left_scroll: f32,
-    left_content_h: f32,
-    /// A card being dragged to a new place.
-    reorder: Option<Reorder>,
+    /// The two widget columns (left, right).
+    cols: [Column; 2],
+    /// A widget being dragged (from a column or the gallery).
+    wdrag: Option<WDrag>,
+    /// The card under the pointer (its grip shows) and a pressed card.
+    hover_card: Option<WPos>,
+    pressed_card: Option<WPos>,
+    /// The tray icon under the pointer (Background Apps names it).
+    pub hover_tray: Option<u64>,
+    /// Shadow under widget cards: (strength, scale, brush).
+    shadow: Option<(f32, f32, CompositionNineGridBrush)>,
 }
 
 fn inside(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
@@ -377,16 +383,14 @@ impl Launchpad {
             dragging: None,
             caret: None,
             wifi_open: false,
-            tray_tips: Vec::new(),
-            tray_hint: None,
             gallery: None,
             form: None,
-            cards: Vec::new(),
-            left_inner: None,
-            left_view: (0.0, 0.0, 0.0, 0.0),
-            left_scroll: 0.0,
-            left_content_h: 0.0,
-            reorder: None,
+            cols: [Column::default(), Column::default()],
+            wdrag: None,
+            hover_card: None,
+            pressed_card: None,
+            hover_tray: None,
+            shadow: None,
         })
     }
 
@@ -408,8 +412,8 @@ impl Launchpad {
         self.scroll_y = 0.0;
         self.settings = None;
         self.gallery = None;
-        self.reorder = None;
-        self.left_scroll = 0.0;
+        self.wdrag = None;
+        self.cols.iter_mut().for_each(|c| c.scroll = 0.0);
         let root = &self.popup.root;
         root.Children()?.RemoveAll()?;
         self.panels.clear();
@@ -444,7 +448,7 @@ impl Launchpad {
         x += cw + gap;
         order.push((PanelId::Right, x, rw));
         for (k, (id, px, pw)) in order.into_iter().enumerate() {
-            let p = ui::panel(c, gfx, backdrop, pw, ph, 28.0 * s, tint, s)?;
+            let p = ui::panel(c, gfx, backdrop, pw, ph, 28.0 * s, tint, s, d.cfg.panel_shadow)?;
             p.root.SetOffset(v3(px - p.margin, top - p.margin, 0.0))?;
             // Rise in, staggered.
             p.body.SetCenterPoint(v3(pw / 2.0, ph / 2.0, 0.0))?;
@@ -478,7 +482,9 @@ impl Launchpad {
             self.dragging = None;
             self.form = None;
             self.gallery = None;
-            self.reorder = None;
+            self.wdrag = None;
+            self.hover_card = None;
+            self.pressed_card = None;
             self.popup.hide();
         }
     }
@@ -553,12 +559,13 @@ impl Launchpad {
     }
 
     fn hit(&mut self, id: PanelId, r: (f32, f32, f32, f32), act: Act, radius: f32, highlight: bool, scroll: bool) {
-        self.hits.push((id, Hit { r, act, radius, highlight, scroll, left: false }));
+        self.hits.push((id, Hit { r, act, radius, highlight, scroll, col: None }));
     }
 
-    /// A hit in the left column's scrolling widget list (content coordinates).
-    fn hit_left(&mut self, r: (f32, f32, f32, f32), act: Act, radius: f32, highlight: bool) {
-        self.hits.push((PanelId::Left, Hit { r, act, radius, highlight, scroll: false, left: true }));
+    /// A hit in a widget column's scrolling list (content coordinates).
+    fn hit_col(&mut self, ci: usize, r: (f32, f32, f32, f32), act: Act, radius: f32, highlight: bool) {
+        let id = if ci == 0 { PanelId::Left } else { PanelId::Right };
+        self.hits.push((id, Hit { r, act, radius, highlight, scroll: false, col: Some(ci) }));
     }
 
     // ------------------------------------------------------------ left: widgets
@@ -895,6 +902,26 @@ impl Launchpad {
             self.hit(PanelId::Center, (ox + ux, oy + y, bw, bh), Act::CheckUpdates, 9.0 * s, true, false);
             y += bh + 20.0 * s;
         }
+        // Widgets: a scrolling page (switches, then settings and every connection).
+        let page = if sec == 4 {
+            let top = y;
+            let host = c.CreateContainerVisual()?;
+            host.SetOffset(v3(0.0, top, 0.0))?;
+            host.SetSize(v2(pw, _ph - top - 8.0 * s))?;
+            host.SetClip(&c.CreateInsetClip()?)?;
+            content.Children()?.InsertAtTop(&host)?;
+            let inner = c.CreateContainerVisual()?;
+            host.Children()?.InsertAtTop(&inner)?;
+            self.scroll_view = (ox, oy + top, pw, _ph - top - 8.0 * s);
+            y = 0.0;
+            Some((inner, top))
+        } else {
+            None
+        };
+        let (content, oy, scroll) = match &page {
+            Some((inner, top)) => (inner, oy + top, true),
+            None => (content, oy, false),
+        };
         let rows = section_rows(sec);
         Self::rect(c, content, pad, y, row_w, rows.len() as f32 * 56.0 * s, 14.0 * s, theme::ink(0.06))?;
         for (k, row) in rows.iter().enumerate() {
@@ -916,7 +943,7 @@ impl Launchpad {
                     Self::rect(c, content, x, yy, sw, sh, sh / 2.0, if v > 0.5 { theme::accent() } else { theme::ink(0.20) })?;
                     let k2 = sh - 4.0 * s;
                     Self::rect(c, content, if v > 0.5 { x + sw - k2 - 2.0 * s } else { x + 2.0 * s }, yy + 2.0 * s, k2, k2, k2 / 2.0, rgba(255, 255, 255, 1.0))?;
-                    self.hit(PanelId::Center, (ox + x - 6.0 * s, oy + yy - 6.0 * s, sw + 12.0 * s, sh + 12.0 * s), Act::Toggle(row.key), sh / 2.0, false, false);
+                    self.hit(PanelId::Center, (ox + x - 6.0 * s, oy + yy - 6.0 * s, sw + 12.0 * s, sh + 12.0 * s), Act::Toggle(row.key), sh / 2.0, false, scroll);
                 }
                 Ctl::Slider { min, max, unit, .. } => {
                     let tw2 = 220.0 * s;
@@ -933,9 +960,17 @@ impl Launchpad {
                         u => format!("{v:.0} {u}"),
                     };
                     Self::txt(c, gfx, content, &val, TextStyle { px: 12.0 * s, color: theme::text_2(), ..Default::default() }, x + tw2 + 14.0 * s, yy - 9.0 * s)?;
-                    self.hit(PanelId::Center, (ox + x - 10.0 * s, oy + yy - 14.0 * s, tw2 + 20.0 * s, 28.0 * s), Act::Slider(row.key), 8.0 * s, false, false);
+                    self.hit(PanelId::Center, (ox + x - 10.0 * s, oy + yy - 14.0 * s, tw2 + 20.0 * s, 28.0 * s), Act::Slider(row.key), 8.0 * s, false, scroll);
                 }
             }
+        }
+        if let Some((inner, _)) = page {
+            y += rows.len() as f32 * 56.0 * s + 24.0 * s;
+            let end = self.render_widget_settings(c, gfx, d, &inner, (ox, oy), pw, y)?;
+            self.content_h = end;
+            self.scroll_y = self.scroll_y.min((end - self.scroll_view.3).max(0.0));
+            inner.SetOffset(v3(0.0, -self.scroll_y, 0.0))?;
+            self.scroll_host = Some(inner);
         }
         Ok(())
     }
@@ -949,193 +984,7 @@ impl Launchpad {
         if self.wifi_open {
             return self.render_wifi(c, gfx, d, &content, pw, ph, ox, oy);
         }
-        let s = self.scale;
-        let pad = 16.0 * s;
-        let cw = pw - 2.0 * pad;
-        let card = theme::ink(0.07);
-        let ctl = d.control;
-        let mut y = pad;
-
-        // Connectivity card
-        let col_w = (cw - 12.0 * s) / 2.0;
-        let ch = 132.0 * s;
-        Self::rect(c, &content, pad, y, col_w, ch, 20.0 * s, card)?;
-        let conn = [
-            (G_WIFI, "Wi-Fi", ctl.wifi, Act::Wifi),
-            (G_BT, "Bluetooth", ctl.bluetooth, Act::Bluetooth),
-        ];
-        for (k, (g, name, on, act)) in conn.iter().enumerate() {
-            let ry = y + 14.0 * s + k as f32 * 56.0 * s;
-            let d_ = 36.0 * s;
-            let active = on.unwrap_or(false);
-            Self::rect(c, &content, pad + 12.0 * s, ry, d_, d_, d_ / 2.0, if active { theme::accent() } else { theme::ink(0.14) })?;
-            Self::glyph(c, gfx, &content, g, 15.0 * s, if active { theme::WHITE } else { theme::text() }, pad + 12.0 * s + d_ / 2.0, ry + d_ / 2.0)?;
-            Self::txt(c, gfx, &content, name, TextStyle { px: 12.5 * s, weight: 600, ..Default::default() }, pad + 56.0 * s, ry + 1.0 * s)?;
-            let state = match on {
-                Some(true) => "On",
-                Some(false) => "Off",
-                None => "Unavailable",
-            };
-            Self::txt(c, gfx, &content, state, TextStyle { px: 11.0 * s, color: theme::text_2(), ..Default::default() }, pad + 56.0 * s, ry + 19.0 * s)?;
-            // The round button switches the radio; the rest of the row opens its list / settings.
-            if on.is_some() {
-                self.hit(PanelId::Right, (ox + pad + 6.0 * s, oy + ry - 6.0 * s, d_ + 12.0 * s, d_ + 12.0 * s), act.clone(), (d_ + 12.0 * s) / 2.0, true, false);
-            }
-            let more = if k == 0 { Act::WifiMenu } else { Act::Uri("ms-settings:bluetooth".into()) };
-            let lx = pad + 6.0 * s + d_ + 14.0 * s;
-            Self::glyph(c, gfx, &content, G_CHEV_R, 10.0 * s, theme::text_3(), pad + col_w - 18.0 * s, ry + d_ / 2.0)?;
-            self.hit(PanelId::Right, (ox + lx, oy + ry - 6.0 * s, pad + col_w - 6.0 * s - lx, d_ + 12.0 * s), more, 12.0 * s, true, false);
-        }
-        // Now playing card
-        let mx = pad + col_w + 12.0 * s;
-        Self::rect(c, &content, mx, y, col_w, ch, 20.0 * s, card)?;
-        match &ctl.media {
-            Some(m) => {
-                Self::glyph(c, gfx, &content, G_MEDIA, 22.0 * s, theme::text_2(), mx + 30.0 * s, y + 30.0 * s)?;
-                Self::txt(c, gfx, &content, &m.title, TextStyle { px: 12.5 * s, weight: 600, max_w: Some(col_w - 24.0 * s), ..Default::default() }, mx + 12.0 * s, y + 54.0 * s)?;
-                Self::txt(c, gfx, &content, &m.artist, TextStyle { px: 11.0 * s, color: theme::text_2(), max_w: Some(col_w - 24.0 * s), ..Default::default() }, mx + 12.0 * s, y + 72.0 * s)?;
-                let by = y + ch - 26.0 * s;
-                let step = col_w / 3.0;
-                for (k, (g, act)) in [(G_PREV, Act::MediaPrev), (if m.playing { G_PAUSE } else { G_PLAY }, Act::MediaPlay), (G_NEXT, Act::MediaNext)].into_iter().enumerate() {
-                    let cx = mx + step * (k as f32 + 0.5);
-                    Self::glyph(c, gfx, &content, g, if k == 1 { 18.0 } else { 14.0 } * s, theme::text(), cx, by)?;
-                    self.hit(PanelId::Right, (ox + cx - 16.0 * s, oy + by - 16.0 * s, 32.0 * s, 32.0 * s), act, 16.0 * s, true, false);
-                }
-            }
-            None => {
-                Self::glyph(c, gfx, &content, G_MEDIA, 22.0 * s, theme::text_3(), mx + col_w / 2.0, y + 48.0 * s)?;
-                Self::txt(c, gfx, &content, "Nothing playing", TextStyle { px: 12.0 * s, color: theme::text_3(), center: true, max_w: Some(col_w), ..Default::default() }, mx, y + 76.0 * s)?;
-            }
-        }
-        y += ch + 12.0 * s;
-
-        // Quick toggles row
-        let tiles = [
-            (G_DARK, "Dark mode", Some(ctl.dark), Act::Dark),
-            (if ctl.muted == Some(true) { G_MUTE } else { G_VOLUME }, "Mute", ctl.muted, Act::Mute),
-            (G_SNIP, "Snip", None, Act::Snip),
-            (G_LOCK, "Lock", None, Act::Lock),
-        ];
-        let tw = (cw - 3.0 * 10.0 * s) / 4.0;
-        let th = 76.0 * s;
-        for (k, (g, name, on, act)) in tiles.into_iter().enumerate() {
-            let x = pad + k as f32 * (tw + 10.0 * s);
-            let active = on.unwrap_or(false);
-            Self::rect(c, &content, x, y, tw, th, 18.0 * s, if active { theme::accent() } else { card })?;
-            Self::glyph(c, gfx, &content, g, 17.0 * s, if active { theme::WHITE } else { theme::text() }, x + tw / 2.0, y + 28.0 * s)?;
-            Self::txt(c, gfx, &content, name, TextStyle { px: 10.5 * s, center: true, max_w: Some(tw), color: theme::text_2(), ..Default::default() }, x, y + 50.0 * s)?;
-            self.hit(PanelId::Right, (ox + x, oy + y, tw, th), act, 18.0 * s, true, false);
-        }
-        y += th + 12.0 * s;
-
-        // Sound slider
-        let sh = 84.0 * s;
-        Self::rect(c, &content, pad, y, cw, sh, 20.0 * s, card)?;
-        Self::txt(c, gfx, &content, "Sound", TextStyle { px: 12.5 * s, weight: 600, ..Default::default() }, pad + 14.0 * s, y + 12.0 * s)?;
-        let vol = ctl.volume.unwrap_or(0.0);
-        let (sx, sy, sw, shh) = (pad + 14.0 * s, y + 42.0 * s, cw - 28.0 * s, 28.0 * s);
-        Self::rect(c, &content, sx, sy, sw, shh, shh / 2.0, theme::ink(0.14))?;
-        if vol > 0.0 {
-            Self::rect(c, &content, sx, sy, (sw * vol).max(shh), shh, shh / 2.0, theme::ink(0.92))?;
-        }
-        Self::glyph(c, gfx, &content, G_VOLUME, 13.0 * s, theme::on_ink(), sx + 16.0 * s, sy + shh / 2.0)?;
-        let pct = format!("{:.0}%", vol * 100.0);
-        let (pw2, _) = Self::txt(c, gfx, &content, &pct, TextStyle { px: 11.5 * s, ..Default::default() }, 0.0, -1000.0)?;
-        Self::txt(c, gfx, &content, &pct, TextStyle { px: 11.5 * s, color: theme::text_2(), ..Default::default() }, pad + cw - 14.0 * s - pw2, y + 13.0 * s)?;
-        if ctl.volume.is_some() {
-            self.hit(PanelId::Right, (ox + sx, oy + sy - 4.0 * s, sw, shh + 8.0 * s), Act::Volume, shh / 2.0, false, false);
-        }
-        y += sh + 12.0 * s;
-
-        // Background apps: the tray icons apps put beside the clock.
-        self.tray_tips.clear();
-        self.tray_hint = None;
-        {
-            let cols = 6usize;
-            let tile = (cw - 16.0 * s) / cols as f32;
-            let head = 34.0 * s;
-            let foot = 26.0 * s;
-            // Leave room below for Windows Update and Windows Settings.
-            let room = ph - y - pad - 2.0 * 12.0 * s - 64.0 * s - 40.0 * s - head - foot - 8.0 * s;
-            let max_rows = ((room / tile).floor() as usize).max(1);
-            let n = d.tray.len().min(max_rows * cols);
-            let rows = n.div_ceil(cols).max(1);
-            let card_h = head + rows as f32 * tile + foot + 8.0 * s;
-            Self::rect(c, &content, pad, y, cw, card_h, 20.0 * s, card)?;
-            Self::txt(c, gfx, &content, "Background Apps", TextStyle { px: 12.5 * s, weight: 600, ..Default::default() }, pad + 14.0 * s, y + 12.0 * s)?;
-            let count = d.tray.len().to_string();
-            let (cw2, _) = Self::txt(c, gfx, &content, &count, TextStyle { px: 11.5 * s, ..Default::default() }, 0.0, -1000.0)?;
-            Self::txt(c, gfx, &content, &count, TextStyle { px: 11.5 * s, color: theme::text_3(), ..Default::default() }, pad + cw - 14.0 * s - cw2, y + 13.0 * s)?;
-            let gx = pad + 8.0 * s;
-            let gy = y + head;
-            let isz = 20.0 * s;
-            for (k, t) in d.tray.iter().take(n).enumerate() {
-                let tx = gx + (k % cols) as f32 * tile;
-                let ty = gy + (k / cols) as f32 * tile;
-                Self::icon(c, &content, t.brush.as_ref(), tx + (tile - isz) / 2.0, ty + (tile - isz) / 2.0, isz)?;
-                self.hit(PanelId::Right, (ox + tx + 2.0 * s, oy + ty + 2.0 * s, tile - 4.0 * s, tile - 4.0 * s), Act::Tray(t.key), 10.0 * s, true, false);
-                let name = if t.tip.is_empty() { "Background app".to_string() } else { t.tip.lines().next().unwrap_or("").to_string() };
-                let (v, _, _) = ui::text(c, gfx, &name, &TextStyle { px: 11.0 * s, color: theme::text_2(), max_w: Some(cw - 28.0 * s), ..Default::default() })?;
-                v.SetOffset(v3((pad + 14.0 * s).round(), (gy + rows as f32 * tile + 6.0 * s).round(), 0.0))?;
-                v.SetOpacity(0.0)?;
-                content.Children()?.InsertAtTop(&v)?;
-                self.tray_tips.push((t.key, v));
-            }
-            let hint = if d.tray.is_empty() {
-                "No background apps"
-            } else {
-                "Click to open · right-click for the app’s menu"
-            };
-            let (v, _, _) = ui::text(c, gfx, hint, &TextStyle { px: 11.0 * s, color: theme::text_3(), max_w: Some(cw - 28.0 * s), ..Default::default() })?;
-            v.SetOffset(v3((pad + 14.0 * s).round(), (gy + rows as f32 * tile + 6.0 * s).round(), 0.0))?;
-            content.Children()?.InsertAtTop(&v)?;
-            self.tray_hint = Some(v);
-            y += card_h + 12.0 * s;
-        }
-
-        // Windows Update: the row opens Settings; "Restart" offers the power menu.
-        {
-            use laminar_sys::update::UpdateStatus as U;
-            let uh = 64.0 * s;
-            Self::rect(c, &content, pad, y, cw, uh, 20.0 * s, card)?;
-            let (sub, restart) = match d.update {
-                None => ("Checking…".to_string(), false),
-                Some(U::RestartRequired) => ("Restart to finish installing updates".to_string(), true),
-                Some(U::Pending(1)) => ("1 update waiting".to_string(), false),
-                Some(U::Pending(n)) => (format!("{n} updates waiting"), false),
-                Some(U::UpToDate) => ("You’re up to date".to_string(), false),
-                Some(U::Unknown) => ("Status unavailable".to_string(), false),
-            };
-            let dot = 36.0 * s;
-            let attention = matches!(d.update, Some(U::RestartRequired | U::Pending(_)));
-            Self::rect(c, &content, pad + 12.0 * s, y + (uh - dot) / 2.0, dot, dot, dot / 2.0, if attention { theme::accent() } else { theme::ink(0.14) })?;
-            Self::glyph(c, gfx, &content, G_UPDATE, 15.0 * s, if attention { theme::WHITE } else { theme::text() }, pad + 12.0 * s + dot / 2.0, y + uh / 2.0)?;
-            let tx = pad + 60.0 * s;
-            let bw = 76.0 * s;
-            let text_w = if restart { cw - 60.0 * s - bw - 20.0 * s } else { cw - 80.0 * s };
-            Self::txt(c, gfx, &content, "Windows Update", TextStyle { px: 12.5 * s, weight: 600, ..Default::default() }, tx, y + 13.0 * s)?;
-            Self::txt(c, gfx, &content, &sub, TextStyle { px: 11.0 * s, color: theme::text_2(), max_w: Some(text_w), ..Default::default() }, tx, y + 32.0 * s)?;
-            if restart {
-                let (bx, bh2) = (pad + cw - bw - 12.0 * s, 30.0 * s);
-                let by = y + (uh - bh2) / 2.0;
-                Self::rect(c, &content, bx, by, bw, bh2, bh2 / 2.0, theme::accent())?;
-                Self::txt(c, gfx, &content, "Restart", TextStyle { px: 11.5 * s, weight: 600, center: true, color: theme::WHITE, max_w: Some(bw), ..Default::default() }, bx, by + (bh2 - 16.0 * s) / 2.0)?;
-                self.hit(PanelId::Right, (ox + bx, oy + by, bw, bh2), Act::Power, bh2 / 2.0, true, false);
-                self.hit(PanelId::Right, (ox + pad, oy + y, cw - bw - 24.0 * s, uh), Act::Uri("ms-settings:windowsupdate".into()), 20.0 * s, true, false);
-            } else {
-                Self::glyph(c, gfx, &content, G_CHEV_R, 10.0 * s, theme::text_3(), pad + cw - 18.0 * s, y + uh / 2.0)?;
-                self.hit(PanelId::Right, (ox + pad, oy + y, cw, uh), Act::Uri("ms-settings:windowsupdate".into()), 20.0 * s, true, false);
-            }
-            y += uh + 12.0 * s;
-        }
-
-        // Shortcut to Windows settings.
-        let bh = 40.0 * s;
-        Self::rect(c, &content, pad, y, cw, bh, 14.0 * s, card)?;
-        Self::glyph(c, gfx, &content, G_SETTINGS, 14.0 * s, theme::text_2(), pad + 22.0 * s, y + bh / 2.0)?;
-        Self::txt(c, gfx, &content, "Windows Settings", TextStyle { px: 12.5 * s, ..Default::default() }, pad + 42.0 * s, y + (bh - 18.0 * s) / 2.0)?;
-        self.hit(PanelId::Right, (ox + pad, oy + y, cw, bh), Act::WinSettings, 14.0 * s, true, false);
-        Ok(())
+        self.render_column(1, c, gfx, d)
     }
 
     /// The right panel's Wi-Fi view: on/off switch and the visible networks.
@@ -1239,11 +1088,11 @@ impl Launchpad {
     fn hit_at(&self, x: f32, y: f32) -> Option<usize> {
         let (vx, vy, vw, vh) = self.scroll_view;
         self.hits.iter().position(|(_, h)| {
-            if h.left {
-                if !inside(self.left_view, x, y) {
+            if let Some(ci) = h.col {
+                if !inside(self.cols[ci].view, x, y) {
                     return false;
                 }
-                inside((h.r.0, h.r.1 - self.left_scroll, h.r.2, h.r.3), x, y)
+                inside((h.r.0, h.r.1 - self.cols[ci].scroll, h.r.2, h.r.3), x, y)
             } else if h.scroll {
                 if !inside((vx, vy, vw, vh), x, y) {
                     return false;
@@ -1261,23 +1110,23 @@ impl Launchpad {
             return;
         }
         self.hover = h;
-        // Name the hovered tray icon under the grid.
-        let tray_key = match h.map(|i| &self.hits[i].1.act) {
-            Some(Act::Tray(k)) => Some(*k),
+        // The card under the pointer shows its grip.
+        let card = match h.map(|i| &self.hits[i].1.act) {
+            Some(Act::Card(p) | Act::Widget(p, _, _)) => Some(*p),
             _ => None,
         };
-        for (k, v) in &self.tray_tips {
-            let _ = v.SetOpacity(if Some(*k) == tray_key { 1.0 } else { 0.0 });
-        }
-        if let Some(v) = &self.tray_hint {
-            let _ = v.SetOpacity(if tray_key.is_some() { 0.0 } else { 1.0 });
-        }
+        self.set_hover_card(c, card);
+        // Background Apps names the tray icon under the pointer.
+        self.hover_tray = match h.map(|i| &self.hits[i].1.act) {
+            Some(Act::Widget(_, crate::widgets::WAct::Tray(k), _)) => Some(*k),
+            _ => None,
+        };
         let Some((shape, geom)) = &self.hover_shape else { return };
         let o: CompositionObject = shape.cast().unwrap();
         match h.map(|i| self.hits[i].1.clone()) {
             Some(hit) if hit.highlight => {
-                let r = if hit.left {
-                    (hit.r.0, hit.r.1 - self.left_scroll, hit.r.2, hit.r.3)
+                let r = if let Some(ci) = hit.col {
+                    (hit.r.0, hit.r.1 - self.cols[ci].scroll, hit.r.2, hit.r.3)
                 } else if hit.scroll {
                     (hit.r.0, hit.r.1 - self.scroll_y, hit.r.2, hit.r.3)
                 } else {
@@ -1316,13 +1165,13 @@ impl Launchpad {
     /// Slider value for a pointer x over the given control (window px), or None.
     pub fn slider_value(&self, act: &Act, x: f32) -> Option<f32> {
         let h = self.hits.iter().find(|(_, h)| &h.act == act)?.1.clone();
-        let inset = if matches!(act, Act::Volume) { 0.0 } else { 10.0 * self.scale };
+        let inset = 10.0 * self.scale;
         let frac = ((x - h.r.0 - inset) / (h.r.2 - 2.0 * inset)).clamp(0.0, 1.0);
         Some(frac)
     }
 
     pub fn slider_range(key: &str) -> Option<(f32, f32, f32)> {
-        for sec in 0..3 {
+        for sec in 0..SECTION_NAMES.len() {
             for r in section_rows(sec) {
                 if r.key == key {
                     if let Ctl::Slider { min, max, step, .. } = r.ctl {
@@ -1399,4 +1248,4 @@ fn short_name(id: &str) -> String {
 // Widget column, gallery and connect form.
 #[path = "launchpad_widgets.rs"]
 mod launchpad_widgets;
-pub use launchpad_widgets::{Card, Form, Reorder};
+pub use launchpad_widgets::{Column, DragSrc, Form, WDrag, WPos, Zone};

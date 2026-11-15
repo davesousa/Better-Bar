@@ -254,6 +254,28 @@ Dave's request: rebuild the widgets after a reference gallery of ~110 widgets in
 
 Checked (agent, 2026-11-15, debug build beside Dave's dock with a copied settings folder, so Dave's config.json was never written): builds with no warnings; 61 tests pass; Launchpad column with live data; all 14 gallery categories; the connect form; dragging a card from 5th to 2nd (lifted card follows the pointer, others make room, order saved); clicking the dock Pomodoro starts it; dragging a dock widget reorders the pins; Start hover; light theme. ⚠️ Not yet tried by hand: saving a real key through the form, typing and pasting in the form with a real keyboard, every widget's buttons, dock widgets on the 4K helper display, and the release build (Dave's running dock locks `target\release\laminar.exe`; quit it first, then `cargo build --release`).
 
+### Widgets, round two (2026-11-15)
+
+Dave's feedback on 0.2.0: drag widgets from the gallery to any place in Launchpad or the dock; resize widgets (icon-sized ones start small); a square analog clock; dragging felt laggy, with no lift until moving and no sign cards can be dragged; dock widgets looked broken when small and didn't magnify; a cleaner Start icon with a reflection or stroke on hover; icons off-centre in tiles; shadow settings; Control Center pieces as widgets placeable on the right too, with Background Apps, Windows Update and Windows Settings always on unless switched off; a Widgets page in Settings with one connection per service.
+
+| Change | How it works |
+| --- | --- |
+| Two widget columns | Launchpad's right panel is now a widget column too. By default it holds what Control Center had, as widgets: Wi-Fi & Bluetooth, Now Playing, Quick Controls (dark mode, mute, snip, lock), Audio Output, Background Apps, Windows Update and Windows Settings. The Wi-Fi network list still opens in that panel. |
+| Always-on widgets | Background Apps, Windows Update and Windows Settings come back on their own unless switched off in **Settings → Widgets**. They can be moved and resized, not removed from their menu, and don't go in the dock. |
+| Drag anywhere | Drag a gallery preview, or any card, into either column: the cards part and a dashed outline shows where it will land. Drag it over the dock and the dock opens a gap at that spot (anywhere among the pinned items). Moving a card from a column to the dock moves it. |
+| Pick up | Pressing a card dips it slightly. Holding still for 0.28 s, or moving, lifts it: a little larger with a deeper shadow. A grip (three dots) shows on the card under the pointer. Launchpad no longer rebuilds every second (stats, controls and update status redraw the affected cards in place), which was the cause of the stutter. Nothing redraws mid-drag. |
+| Sizes | Right-click → Small, Medium or Large, in Launchpad and the dock. Small = half a column (two pair up side by side); Large = twice as tall, showing more (a chart, rows, the week, a month grid, a bigger ring). In the dock: one icon, the widget's own width, or wider. Icon-like widgets (analog clocks, day page, tiles) start small. Saved as `{ "id": "analog", "size": "small" }` in config.json; plain ids still work. |
+| Layouts at every size | Every widget now has five layouts: one dock icon, the dock wider, small, medium and large. Compact versions drop or move parts instead of squeezing them (e.g. the dock clock puts the date beside the time when there's room). Text that doesn't fit shrinks to a minimum, then trims. |
+| Dock magnification | Dock widgets now grow on hover like icons (half as much, since they're wider), counting the pointer as "on" a widget anywhere across its width. They're painted at their magnified size, so they stay sharp. |
+| New widgets | Analog Square (the analog face in a rounded square, numerals when there's room) and the six Control Center widgets. |
+| Start button | The Windows mark itself, nothing behind it: four panes with one blue gradient running across all of them, a faint highlight on each pane's top edge. On hover, a soft reflection sweeps once across the glass, top-left to bottom-right (0.85 s). It stays still if Windows' **Animation effects** is off. |
+| Icon centring | Icons (Segoe Fluent glyphs) are centred on their drawn shape, not their text box, in widgets and across Launchpad. Tiles were redrawn: a rounded-square plate with the name beside or under it. Keep Awake uses a cup glyph instead of an emoji. |
+| Shadows | **Settings → Glass → Panel shadow** (under the three panels) and **Widget shadow** (under every widget and tile). |
+| Settings → Widgets | Switches for the always-on widgets; widget settings (weather location, looked up by name; world clock cities; revenue goal); and every connection, one row per service, with its status and the widgets that use it. One connection serves every widget for that service. |
+| Testing aid | `laminar.exe --widget-sheet out.png [light] [filter]` paints every widget at every size into one image with sample data. Used to review all 109 widgets × 6 sizes. |
+
+Checked (agent, 2026-11-15): builds with no warnings; 65 tests pass (4 new: small-card pairing, old and new config entries, always-on widgets, unique ids); every widget at every size reviewed on the widget sheet; the test dock starts and lays out widgets of each size. ⚠️ Not yet checked on screen (the PC locked mid-session): the two columns live, dragging from the gallery and between columns, dragging into the dock, press-and-hold lift, dock widget magnification, the Start reflection, and Settings → Widgets.
+
 ### Known gaps
 
 - Tray icons (the apps normally beside the clock) aren't hosted yet, and there's no Windows Update status. *(Done 2026-11-10.)*

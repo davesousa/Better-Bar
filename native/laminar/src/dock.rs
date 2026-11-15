@@ -138,6 +138,8 @@ const CMD_TIMER_MIN_BASE: usize = 3000;
 const TIMER_MINUTES: [usize; 7] = [1, 5, 10, 15, 25, 45, 60];
 /// Widget refresh (once a second).
 const T_WIDGETS: usize = 22;
+/// Holding a widget card lifts it (ready to drag) after this long.
+const T_LP_HOLD: usize = 23;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -152,11 +154,25 @@ pub enum Kind {
     Widget,
 }
 
-/// The widget a dock item shows.
+/// The widget a dock item shows (key "::widget{pin}:{id}:{s|m|l}").
 fn widget_of(key: &str) -> Option<&'static crate::widgets::Def> {
     let rest = key.strip_prefix("::widget")?;
-    crate::widgets::catalog::get(rest.split_once(':')?.1)
+    crate::widgets::catalog::get(rest.split(':').nth(1)?)
 }
+
+/// The size a dock widget item is shown at.
+fn widget_size(key: &str) -> crate::widgets::Size {
+    use crate::widgets::Size;
+    match key.rsplit(':').next() {
+        Some("s") => Size::Small,
+        Some("l") => Size::Large,
+        Some("m") => Size::Medium,
+        _ => widget_of(key).map(|d| d.size).unwrap_or_default(),
+    }
+}
+
+/// How much widgets magnify, relative to icons (they're wider, so less is plenty).
+const WIDGET_MAG: f32 = 0.5;
 
 /// Pin index of a widget item.
 fn widget_pin(key: &str) -> Option<usize> {
@@ -196,8 +212,14 @@ struct Geo {
     left: Vec<f32>,
     width: Vec<f32>,
     icon: Vec<bool>,
-    /// Widget items (fixed width, never magnified).
+    /// Widget items.
     wid: Vec<bool>,
+    /// Per item: drawn width before magnification (icon size, a widget's width, 0 for
+    /// separators), magnification strength (0: never), and how far from its centre the
+    /// pointer can be and still count as "on" it (half the extra width of a widget).
+    vw: Vec<f32>,
+    kk: Vec<f32>,
+    flat: Vec<f32>,
     hover_lr: (i32, i32),
 }
 
@@ -212,17 +234,23 @@ impl Geo {
         let margin = 8.0 * scale;
         let label_room = 40.0 * scale;
         let win_h = ((m - b) + shelf_h + margin + label_room).ceil();
+        let k = m / b - 1.0;
         let (mut left, mut width, mut x) = (Vec::new(), Vec::new(), 0.0);
+        let (mut vw, mut kk, mut flat) = (Vec::new(), Vec::new(), Vec::new());
         for it in items {
-            let w = if it.kind == Kind::Widget {
-                widget_of(&it.key).map(|d| crate::widgets::dock_width(d, b)).unwrap_or(b) + g
+            let (w, v, kx) = if it.kind == Kind::Widget {
+                let ww = widget_of(&it.key).map(|d| crate::widgets::dock_width(d, widget_size(&it.key), b)).unwrap_or(b);
+                (ww + g, ww, k * WIDGET_MAG)
             } else if it.is_icon() {
-                b + g
+                (b + g, b, k)
             } else {
-                sep_w
+                (sep_w, 0.0, 0.0)
             };
             left.push(x);
             width.push(w);
+            vw.push(v);
+            kk.push(kx);
+            flat.push(((v - b) / 2.0).max(0.0));
             x += w;
         }
         let shelf_w = x + 2.0 * p;
@@ -234,6 +262,9 @@ impl Geo {
             sep_w, win_w, win_h, x0, y0, shelf_w, shelf_h, left, width,
             icon: items.iter().map(|i| i.is_icon()).collect(),
             wid: items.iter().map(|i| i.kind == Kind::Widget).collect(),
+            vw,
+            kk,
+            flat,
             hover_lr: (0, 0),
         };
         // The hover region must contain the dock at every pointer position.
@@ -241,7 +272,7 @@ impl Geo {
         let mut px = x0 - geo.range;
         while px < x0 + shelf_w + geo.range {
             let (dx, scales) = geo.layout(px, 1.0);
-            let grow: f32 = scales.iter().map(|s| (s - 1.0) * b).sum();
+            let grow: f32 = scales.iter().zip(&geo.vw).map(|(s, v)| (s - 1.0) * v).sum();
             lo = lo.min(dx);
             hi = hi.max(dx + shelf_w + grow);
             px += 2.0;
@@ -256,20 +287,19 @@ impl Geo {
 
     /// Rust mirror of the compositor expressions: (shelf x, per-item scale).
     fn layout(&self, px: f32, amount: f32) -> (f32, Vec<f32>) {
-        let k = self.m / self.b - 1.0;
         let scales: Vec<f32> = (0..self.left.len())
             .map(|i| {
-                if !self.icon[i] {
+                if self.kk[i] <= 0.0 {
                     return 1.0;
                 }
-                let d = ((px - self.center_abs(i)).abs() / self.range).min(1.0);
-                1.0 + k * amount * ((d * PI).cos() + 1.0) / 2.0
+                let d = (((px - self.center_abs(i)).abs() - self.flat[i]).max(0.0) / self.range).min(1.0);
+                1.0 + self.kk[i] * amount * ((d * PI).cos() + 1.0) / 2.0
             })
             .collect();
         let mut shift = 0.0;
         for i in 0..self.left.len() {
             let h = ((px - (self.x0 + self.p + self.left[i])) / self.width[i]).clamp(0.0, 1.0);
-            shift += (scales[i] - 1.0) * self.b * h;
+            shift += (scales[i] - 1.0) * self.vw[i] * h;
         }
         (self.x0 - shift, scales)
     }
@@ -277,16 +307,17 @@ impl Geo {
     /// Centre x (window px) of item i when the pointer is at px, and its scale.
     fn slot_center(&self, px: f32, amount: f32, i: usize) -> (f32, f32) {
         let (dx, scales) = self.layout(px, amount);
-        let acc: f32 = (0..i).map(|j| (scales[j] - 1.0) * self.b).sum();
-        let l = dx + self.p + self.left[i] + acc + if self.icon[i] { self.g / 2.0 } else { 0.0 };
-        (l + self.b * scales[i] / 2.0, scales[i])
+        let acc: f32 = (0..i).map(|j| (scales[j] - 1.0) * self.vw[j]).sum();
+        let l = dx + self.p + self.left[i] + acc + if self.icon[i] || self.wid[i] { self.g / 2.0 } else { 0.0 };
+        (l + self.vw[i].max(self.b) * scales[i] / 2.0, scales[i])
     }
 
-    /// Left edge (window px) of a widget item when the pointer is at px.
-    fn item_left(&self, px: f32, amount: f32, i: usize) -> f32 {
+    /// Left and top edges (window px) of a widget item and its scale, pointer at px.
+    fn item_rect(&self, px: f32, amount: f32, i: usize) -> (f32, f32, f32) {
         let (dx, scales) = self.layout(px, amount);
-        let acc: f32 = (0..i).map(|j| (scales[j] - 1.0) * self.b).sum();
-        dx + self.p + self.left[i] + acc + self.g / 2.0
+        let acc: f32 = (0..i).map(|j| (scales[j] - 1.0) * self.vw[j]).sum();
+        let s = scales[i];
+        (dx + self.p + self.left[i] + acc + self.g / 2.0, self.y0 + self.p + self.b - self.b * s, s)
     }
 
     /// Which icon is under (x, y)?
@@ -296,14 +327,15 @@ impl Geo {
         for i in 0..self.left.len() {
             let w = if self.icon[i] { self.b * scales[i] } else { 0.0 };
             let l = dx + self.p + self.left[i] + acc;
-            let slot = self.width[i] + (scales[i] - 1.0) * self.b;
+            let slot = self.width[i] + (scales[i] - 1.0) * self.vw[i];
             if self.icon[i] && x >= l && x < l + slot && y >= self.y0 + self.p + self.b - w - self.g {
                 return Some(i);
             }
-            if self.wid[i] && x >= l + self.g / 2.0 && x < l + self.width[i] - self.g / 2.0 && y >= self.y0 + self.p - 6.0 && y < self.y0 + self.p + self.b + 6.0 {
+            let top = self.y0 + self.p + self.b - self.b * scales[i];
+            if self.wid[i] && x >= l + self.g / 2.0 && x < l + slot - self.g / 2.0 && y >= top - 6.0 && y < self.y0 + self.p + self.b + 6.0 {
                 return Some(i);
             }
-            acc += (scales[i] - 1.0) * self.b;
+            acc += (scales[i] - 1.0) * self.vw[i];
         }
         None
     }
@@ -333,6 +365,8 @@ struct Drag {
     merge_ready: bool,
     /// Set when the icon came from Launchpad (not from the dock); `index` is then unused.
     ext: Option<String>,
+    /// A widget dragged in from Launchpad: the pin to insert.
+    ext_widget: Option<Pin>,
 }
 
 /// The floating copy of an icon that follows the pointer while dragging.
@@ -487,9 +521,9 @@ struct Dock {
     /// Pin index of the widget a dock menu is about.
     menu_widget: Option<usize>,
     /// Launchpad widget (list index) a menu is about.
-    menu_lpw: Option<usize>,
+    menu_lpw: Option<crate::launchpad::WPos>,
     /// A Launchpad widget card pressed (index, x, y): a click, or a reorder drag if it moves.
-    lpw_press: Option<(usize, f32, f32)>,
+    lpw_press: Option<(crate::launchpad::DragSrc, f32, f32)>,
     /// Ticks of the widget timer (seconds).
     wtick: u64,
     /// The Start button's four panes, and whether they're spread (hovered).
@@ -497,55 +531,77 @@ struct Dock {
     start_open: bool,
 }
 
-/// One pane of the Start mark: its visual, resting offset and the way it moves on hover.
+/// The Start mark's hover effect: a property set whose `Sheen` value moves the reflection.
 struct StartPane {
-    vis: ShapeVisual,
-    rest: (f32, f32),
-    dir: (f32, f32),
-    spread: f32,
+    fx: CompositionPropertySet,
+    b: f32,
 }
 
-/// The Start button: four rounded panes on a quiet frosted tile, all vector shapes
-/// (crisp at any magnification). Monochrome, following the theme.
+/// The Start button: the Windows mark itself, four panes and nothing behind them, in the
+/// logo's blue (one gradient running across all four, so they read as a single pane of
+/// glass). Vector shapes and brushes only, so it stays crisp at any magnification. Each
+/// pane carries a hidden reflection band that `start_hover` sweeps across.
 fn start_tile(c: &Compositor, b: f32) -> Result<(ContainerVisual, Vec<StartPane>)> {
-    let light = crate::ui::theme::light();
     let tile = c.CreateContainerVisual()?;
     tile.SetRelativeSizeAdjustment(v2(1.0, 1.0))?;
-    // Tile: a soft top-to-bottom sheen of the theme's ink, a hairline rim.
-    let bgv = c.CreateShapeVisual()?;
-    bgv.SetSize(v2(b, b))?;
-    let geo = c.CreateRoundedRectangleGeometry()?;
-    geo.SetSize(v2(b, b))?;
-    geo.SetCornerRadius(v2(b * 0.24, b * 0.24))?;
-    let shape = c.CreateSpriteShapeWithGeometry(&geo)?;
-    let grad = c.CreateLinearGradientBrush()?;
-    grad.SetStartPoint(v2(0.0, 0.0))?;
-    grad.SetEndPoint(v2(0.0, b))?;
-    grad.SetMappingMode(CompositionMappingMode::Absolute)?;
-    let ink = |a: f32| if light { Color { A: (a * 0.55 * 255.0) as u8, R: 20, G: 20, B: 30 } } else { Color { A: (a * 255.0) as u8, R: 255, G: 255, B: 255 } };
-    grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(0.0, ink(0.20))?)?;
-    grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(1.0, ink(0.11))?)?;
-    shape.SetFillBrush(&grad)?;
-    shape.SetStrokeBrush(&c.CreateColorBrushWithColor(ink(0.22))?)?;
-    shape.SetStrokeThickness(1.0)?;
-    bgv.Shapes()?.Append(&shape)?;
-    tile.Children()?.InsertAtTop(&bgv)?;
-    // Panes: 2 x 2, centred, with a narrow gap like the Windows mark.
-    let pane = (b * 0.205).round();
-    let gap = (b * 0.045).max(2.0).round();
-    let x0 = ((b - 2.0 * pane - gap) / 2.0).round();
-    let fill = if light { Color { A: 225, R: 28, G: 28, B: 34 } } else { Color { A: 242, R: 248, G: 248, B: 250 } };
-    let mut panes = Vec::new();
-    for (k, (cx, cy)) in [(0.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
-        let (v, _, _) = crate::ui::rounded(c, pane, pane, pane * 0.2, fill)?;
-        let rest = (x0 + cx * (pane + gap), x0 + cy * (pane + gap));
-        v.SetOffset(v3(rest.0, rest.1, 0.0))?;
-        v.SetCenterPoint(v3(pane / 2.0, pane / 2.0, 0.0))?;
-        tile.Children()?.InsertAtTop(&v)?;
-        let _ = k;
-        panes.push(StartPane { vis: v, rest, dir: (cx * 2.0 - 1.0, cy * 2.0 - 1.0), spread: (b * 0.03).max(1.5) });
+    let mark = (b * 0.74).round();
+    let gap = (b * 0.04).max(2.0).round();
+    let pane = ((mark - gap) / 2.0).round();
+    let x0 = ((b - (2.0 * pane + gap)) / 2.0).round();
+    let radius = (pane * 0.08).max(1.0);
+    let fx = c.CreatePropertySet()?;
+    fx.InsertScalar(&hs("Sheen"), -b)?;
+    let fx_obj: CompositionObject = fx.cast()?;
+    let col = |r: u8, g: u8, bl: u8, a: u8| Color { A: a, R: r, G: g, B: bl };
+    for (cx, cy) in [(0.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+        let (px, py) = (x0 + cx * (pane + gap), x0 + cy * (pane + gap));
+        let holder = c.CreateContainerVisual()?;
+        holder.SetSize(v2(pane, pane))?;
+        holder.SetOffset(v3(px, py, 0.0))?;
+        let geo = c.CreateRoundedRectangleGeometry()?;
+        geo.SetSize(v2(pane, pane))?;
+        geo.SetCornerRadius(v2(radius, radius))?;
+        holder.SetClip(&c.CreateGeometricClipWithGeometry(&geo)?)?;
+        // The fill: a light-to-deep blue diagonal measured across the whole mark.
+        let fill = c.CreateSpriteVisual()?;
+        fill.SetSize(v2(pane, pane))?;
+        let grad = c.CreateLinearGradientBrush()?;
+        grad.SetMappingMode(CompositionMappingMode::Absolute)?;
+        grad.SetStartPoint(v2(x0 - px, x0 - py))?;
+        grad.SetEndPoint(v2(x0 + mark - px, x0 + mark - py))?;
+        grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(0.0, col(0x7A, 0xD3, 0xFF, 255))?)?;
+        grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(0.55, col(0x1E, 0x90, 0xF0, 255))?)?;
+        grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(1.0, col(0x0A, 0x5F, 0xC8, 255))?)?;
+        fill.SetBrush(&grad)?;
+        holder.Children()?.InsertAtTop(&fill)?;
+        // A faint top edge highlight, like light catching glass.
+        let edge = c.CreateSpriteVisual()?;
+        edge.SetSize(v2(pane, (pane * 0.5).round()))?;
+        let eg = c.CreateLinearGradientBrush()?;
+        eg.SetStartPoint(v2(0.0, 0.0))?;
+        eg.SetEndPoint(v2(0.0, 1.0))?;
+        eg.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(0.0, col(255, 255, 255, 46))?)?;
+        eg.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(1.0, col(255, 255, 255, 0))?)?;
+        edge.SetBrush(&eg)?;
+        holder.Children()?.InsertAtTop(&edge)?;
+        // The reflection: a soft diagonal band, positioned from the shared Sheen value so
+        // it sweeps across all four panes as one.
+        let band = c.CreateSpriteVisual()?;
+        band.SetSize(v2(2.0 * b, 2.0 * b))?;
+        let bg = c.CreateLinearGradientBrush()?;
+        bg.SetStartPoint(v2(0.0, 0.0))?;
+        bg.SetEndPoint(v2(1.0, 1.0))?;
+        for (o, a) in [(0.0, 0u8), (0.43, 0), (0.5, 120), (0.57, 0), (1.0, 0)] {
+            bg.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(o, col(255, 255, 255, a))?)?;
+        }
+        band.SetBrush(&bg)?;
+        let e = c.CreateExpressionAnimationWithExpression(&hs(&format!("Vector3(fx.Sheen - {b} - {px}, fx.Sheen - {b} - {py}, 0)")))?;
+        e.SetReferenceParameter(&hs("fx"), &fx_obj)?;
+        band.StartAnimation(&hs("Offset"), &e)?;
+        holder.Children()?.InsertAtTop(&band)?;
+        tile.Children()?.InsertAtTop(&holder)?;
     }
-    Ok((tile, panes))
+    Ok((tile, vec![StartPane { fx, b }]))
 }
 
 /// A widget drawn in the dock.
@@ -556,6 +612,8 @@ struct WView {
     painted: crate::widgets::Painted,
     w: f32,
     h: f32,
+    /// Surface resolution relative to w×h (the magnified size).
+    res: f32,
 }
 
 thread_local! {
@@ -722,7 +780,15 @@ impl Dock {
                 Pin::Id(id) if id == SEPARATOR => v.push(Item { kind: Kind::Separator, key: format!("::sep{n}"), pinned: true }),
                 Pin::Id(id) => v.push(Item { kind: Kind::App, key: id.clone(), pinned: true }),
                 Pin::Stack { .. } => v.push(Item { kind: Kind::Stack, key: format!("::stack{n}"), pinned: true }),
-                Pin::Widget { widget } => v.push(Item { kind: Kind::Widget, key: format!("::widget{n}:{widget}"), pinned: true }),
+                Pin::Widget { widget, size } => {
+                    let sz = size.or_else(|| crate::widgets::catalog::get(widget).map(|d| d.size)).unwrap_or_default();
+                    let code = match sz {
+                        crate::widgets::Size::Small => "s",
+                        crate::widgets::Size::Medium => "m",
+                        crate::widgets::Size::Large => "l",
+                    };
+                    v.push(Item { kind: Kind::Widget, key: format!("::widget{n}:{widget}:{code}"), pinned: true })
+                }
             }
         }
         // Running apps that aren't pinned, in the order they first appeared.
@@ -885,7 +951,7 @@ impl Dock {
                 self.tiles.push(Some(tile.cast()?));
                 start_panes = panes;
             } else if let (Kind::Widget, Some(def)) = (it.kind, widget_of(&it.key)) {
-                let ww = crate::widgets::dock_width(def, geo.b);
+                let ww = crate::widgets::dock_width(def, widget_size(&it.key), geo.b);
                 slot.SetSize(v2(ww, geo.b))?;
                 let tile = c.CreateContainerVisual()?;
                 tile.SetSize(v2(ww, geo.b))?;
@@ -942,17 +1008,21 @@ impl Dock {
         let n = self.slots.len();
         let base_x = |i: usize| geo.p + geo.left[i] + if geo.icon[i] || geo.wid[i] { geo.g / 2.0 } else { 0.0 };
         let grow_of = |name: &str, i: usize| {
-            if geo.icon[i] { format!("(({name}.Scale.X - 1) * {b})", b = geo.b) } else { "0".to_string() }
+            if geo.kk[i] > 0.0 { format!("(({name}.Scale.X - 1) * {w})", w = geo.vw[i]) } else { "0".to_string() }
         };
 
         // Each icon's scale: cosine falloff from the pointer, blended by Amount.
+        let _ = geo_k;
         for (i, slot) in self.slots.iter().enumerate() {
-            if !geo.icon[i] {
+            if geo.kk[i] <= 0.0 {
                 continue;
             }
+            // Widgets count the pointer as "on" them anywhere across their width.
             let s = format!(
-                "1 + {geo_k} * ptr.Amount * ((Cos(Min(Abs(ptr.PointerX - {c}) / {r}, 1) * 3.14159265) + 1) / 2)",
+                "1 + {k} * ptr.Amount * ((Cos(Min(Max(Abs(ptr.PointerX - {c}) - {f}, 0) / {r}, 1) * 3.14159265) + 1) / 2)",
+                k = geo.kk[i],
                 c = geo.center_abs(i),
+                f = geo.flat[i],
                 r = geo.range
             );
             slot.StartAnimation(&hs("Scale"), &self.expr(&format!("Vector3({s}, {s}, 1)"), &[])?)?;
@@ -1103,11 +1173,13 @@ impl Dock {
         self.start_open = false;
         for (idx, def, tile, ww) in widget_tiles {
             let h = self.geo.b;
-            match self.gfx.surface(ww, h) {
+            // Painted at its magnified size so it stays sharp when it grows.
+            let res = 1.0 + self.geo.kk[idx];
+            match self.gfx.surface(ww * res, h * res) {
                 Ok(surface) => {
-                    let sp = crate::ui::surface_sprite(&c, &surface, ww, h)?;
+                    let sp = crate::ui::stretch_sprite(&c, &surface, ww, h)?;
                     tile.Children()?.InsertAtTop(&sp)?;
-                    self.wviews.insert(idx, WView { def, surface, tile, painted: Default::default(), w: ww, h });
+                    self.wviews.insert(idx, WView { def, surface, tile, painted: Default::default(), w: ww, h, res });
                 }
                 Err(e) => trace!("widget surface failed: {e:?}"),
             }
@@ -1123,36 +1195,28 @@ impl Dock {
         Ok(())
     }
 
-    /// Hovering the Start button: its panes ease apart a little, one after another, and
-    /// settle back when the pointer leaves. Nothing moves if Windows' animations are off.
+    /// Hovering the Start button: a soft reflection sweeps once across the mark, top-left
+    /// to bottom-right (like light passing over glass). Nothing moves if Windows'
+    /// animations are off.
     fn start_hover(&mut self, on: bool) {
         if on == self.start_open || self.start_panes.is_empty() {
             return;
         }
         self.start_open = on;
-        if !animations_enabled() {
+        if !on || !animations_enabled() {
             return;
         }
         let c = &self.compositor;
-        let Ok(springy) = c.CreateCubicBezierEasingFunction(v2(0.34, 1.45), v2(0.64, 1.0)) else { return };
-        let Ok(settle) = c.CreateCubicBezierEasingFunction(v2(0.2, 0.8), v2(0.2, 1.0)) else { return };
-        for (k, p) in self.start_panes.iter().enumerate() {
-            let (tx, ty, sc) = if on { (p.rest.0 + p.dir.0 * p.spread, p.rest.1 + p.dir.1 * p.spread, 0.94) } else { (p.rest.0, p.rest.1, 1.0) };
-            if let (Ok(a), Ok(s)) = (c.CreateVector3KeyFrameAnimation(), c.CreateVector3KeyFrameAnimation()) {
-                let e = if on { &springy } else { &settle };
-                let _ = a.InsertKeyFrameWithEasingFunction(1.0, v3(tx, ty, 0.0), e);
-                let _ = s.InsertKeyFrameWithEasingFunction(1.0, v3(sc, sc, 1.0), e);
-                let dur = ms(((if on { 420.0 } else { 260.0 }) * slowmo()) as i64);
-                let _ = a.SetDuration(dur);
-                let _ = s.SetDuration(dur);
-                if on {
-                    // Reading order: top-left, top-right, bottom-left, bottom-right.
-                    let _ = a.SetDelayTime(ms((k as f32 * 45.0 * slowmo()) as i64));
-                    let _ = s.SetDelayTime(ms((k as f32 * 45.0 * slowmo()) as i64));
-                }
-                let _ = p.vis.StartAnimation(&hs("Offset"), &a);
-                let _ = p.vis.StartAnimation(&hs("Scale"), &s);
-            }
+        let Some(p) = self.start_panes.first() else { return };
+        let Ok(a) = c.CreateScalarKeyFrameAnimation() else { return };
+        let Ok(e) = c.CreateCubicBezierEasingFunction(v2(0.45, 0.0), v2(0.25, 1.0)) else { return };
+        // The band's centre line runs where x + y = 2 * Sheen; start it before the mark's
+        // top-left corner and end it past the bottom-right.
+        let _ = a.InsertKeyFrame(0.0, -0.35 * p.b);
+        let _ = a.InsertKeyFrameWithEasingFunction(1.0, 1.35 * p.b, &e);
+        let _ = a.SetDuration(ms((850.0 * slowmo()) as i64));
+        if let Ok(o) = p.fx.cast::<CompositionObject>() {
+            let _ = o.StartAnimation(&hs("Sheen"), &a);
         }
     }
 
@@ -1712,7 +1776,10 @@ impl Dock {
                     m.push(MenuItem::item(format!("{mins} min"), CMD_TIMER_MIN_BASE + mins).checked(mins == cur));
                 }
             }
-            let in_lp = self.cfg.launchpad_widgets.iter().any(|w| w == def.id);
+            m.push(MenuItem::sep());
+            m.extend(self.dock_size_items(&it.key));
+            m.push(MenuItem::sep());
+            let in_lp = self.cfg.launchpad_widgets.iter().chain(self.cfg.right_widgets.iter()).any(|w| w.id() == def.id);
             m.push(MenuItem::item("Show in Launchpad", CMD_WIDGET_TO_LP).checked(in_lp));
             m.push(MenuItem::item("Remove from Dock", CMD_WIDGET_REMOVE).danger());
             m.push(MenuItem::sep());
@@ -1798,6 +1865,11 @@ impl Dock {
             }
             "start-hover" => {
                 let (sx, sy) = (g.center_abs(0), g.y0 + g.shelf_h / 2.0);
+                self.on_move(sx, sy);
+            }
+            "hover-item" => {
+                let k = std::env::var("LAMINAR_DEMO_ITEM").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize).min(g.left.len().saturating_sub(1));
+                let (sx, sy) = (g.center_abs(k), g.y0 + g.shelf_h / 2.0);
                 self.on_move(sx, sy);
             }
             "lp-gallery" | "lp-form" => {
@@ -1995,6 +2067,8 @@ impl Dock {
     fn save_and_apply(&mut self, f: impl FnOnce(&mut Config)) {
         let mut cfg = self.cfg.clone();
         f(&mut cfg);
+        // Same rules as loading the file (e.g. always-on widgets appear or go at once).
+        let cfg = cfg.sanitized();
         cfg.save();
         self.apply_config(cfg);
     }
@@ -2220,17 +2294,17 @@ impl Dock {
             let (x, y) = lparam_xy(lp);
             match msg {
                 WM_MOUSEMOVE => {
-                    if self.launchpad.reordering() {
-                        self.launchpad.reorder_move(&self.compositor, y);
-                    } else if let Some((i, px, py)) = self.lpw_press {
+                    if self.launchpad.dragging() {
+                        self.lp_drag_move(x, y);
+                    } else if let Some((src, px, py)) = self.lpw_press {
                         if ((x - px).powi(2) + (y - py).powi(2)).sqrt() > 6.0 * self.scale {
-                            // Dragging a widget card: reorder the column.
+                            // Dragging a widget card or a gallery preview.
                             self.lpw_press = None;
-                            self.launchpad.begin_reorder(&self.compositor, i, py);
-                            self.launchpad.reorder_move(&self.compositor, y);
                             unsafe {
-                                SetCapture(hwnd);
+                                let _ = KillTimer(Some(self.hwnd), T_LP_HOLD);
                             }
+                            self.lp_begin_drag(src, px, py);
+                            self.lp_drag_move(x, y);
                         }
                     } else if let Some(a) = self.lp_drag.clone() {
                         self.lp_slider(&a, x, false);
@@ -2242,18 +2316,38 @@ impl Dock {
                             self.start_external_drag(&id);
                         }
                     } else {
+                        let tray = self.launchpad.hover_tray;
                         self.launchpad.on_move(&self.compositor, x, y);
+                        if self.launchpad.hover_tray != tray {
+                            self.lp_render("live");
+                        }
                     }
                 }
                 WM_LBUTTONDOWN => {
                     if let Some(Act::App(id)) = self.launchpad.act_at(x, y) {
                         self.lp_press = Some((id, x, y));
                     }
-                    if let Some(Act::Card(i) | Act::Widget(i, _, _)) = self.launchpad.act_at(x, y) {
-                        self.lpw_press = Some((i, x, y));
+                    match self.launchpad.act_at(x, y) {
+                        Some(Act::Card(p) | Act::Widget(p, _, _)) => {
+                            // Press: the card dips; holding lifts it, moving drags it.
+                            self.lpw_press = Some((crate::launchpad::DragSrc::Col(p), x, y));
+                            self.launchpad.press_card(&self.compositor, p);
+                            unsafe {
+                                SetCapture(hwnd);
+                                SetTimer(Some(self.hwnd), T_LP_HOLD, 280, None);
+                            }
+                        }
+                        Some(Act::GalleryItem(id)) => {
+                            self.lpw_press = Some((crate::launchpad::DragSrc::Gallery(id), x, y));
+                            unsafe {
+                                SetCapture(hwnd);
+                                SetTimer(Some(self.hwnd), T_LP_HOLD, 280, None);
+                            }
+                        }
+                        _ => {}
                     }
                     if let Some(a) = self.launchpad.act_at(x, y) {
-                        if matches!(a, Act::Volume | Act::Slider(_)) {
+                        if matches!(a, Act::Slider(_)) {
                             self.lp_drag = Some(a.clone());
                             unsafe {
                                 SetCapture(hwnd);
@@ -2264,38 +2358,34 @@ impl Dock {
                 }
                 WM_LBUTTONUP => {
                     self.lp_press = None;
-                    self.lpw_press = None;
-                    if self.launchpad.reordering() {
-                        unsafe {
-                            let _ = ReleaseCapture();
-                        }
-                        match self.launchpad.end_reorder() {
-                            Some((from, to)) => {
-                                trace!("launchpad widget moved {from} -> {to}");
-                                self.save_and_apply(|c| {
-                                    if from < c.launchpad_widgets.len() {
-                                        let w = c.launchpad_widgets.remove(from);
-                                        c.launchpad_widgets.insert(to.min(c.launchpad_widgets.len()), w);
-                                    }
-                                });
-                            }
-                            None => {}
-                        }
-                        self.lp_render("left");
+                    let was_pressed = self.lpw_press.take().is_some();
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), T_LP_HOLD);
+                    }
+                    if self.launchpad.dragging() {
+                        self.lp_end_drag();
                     } else if let Some(a) = self.lp_drag.take() {
                         unsafe {
                             let _ = ReleaseCapture();
                         }
                         self.lp_slider(&a, x, true);
-                    } else if let Some(a) = self.launchpad.act_at(x, y) {
-                        self.lp_act(a);
+                    } else {
+                        if was_pressed {
+                            self.launchpad.release_card(&self.compositor);
+                            unsafe {
+                                let _ = ReleaseCapture();
+                            }
+                        }
+                        if let Some(a) = self.launchpad.act_at(x, y) {
+                            self.lp_act(a);
+                        }
                     }
                 }
                 WM_RBUTTONUP => {
-                    if let Some(Act::Card(i) | Act::Widget(i, _, _)) = self.launchpad.act_at(x, y) {
-                        self.lp_widget_menu(i);
-                    } else if let Some(Act::Tray(key)) = self.launchpad.act_at(x, y) {
+                    if let Some(Act::Widget(_, crate::widgets::WAct::Tray(key), _)) = self.launchpad.act_at(x, y) {
                         self.tray_click(key, crate::tray::Click::Right);
+                    } else if let Some(Act::Card(p) | Act::Widget(p, _, _)) = self.launchpad.act_at(x, y) {
+                        self.lp_widget_menu(p);
                     } else if let Some(Act::App(id)) = self.launchpad.act_at(x, y) {
                         let in_dock = self.cfg.pins.iter().any(|p| p.app() == Some(id.as_str()));
                         let in_lp = self.lp_pinned().contains(&id);
@@ -2327,8 +2417,8 @@ impl Dock {
                     // Wheel messages carry screen coordinates.
                     let (sx, sy) = ((lp.0 & 0xFFFF) as i16 as f32, ((lp.0 >> 16) & 0xFFFF) as i16 as f32);
                     let (wx, wy) = (sx - self.monitor.left as f32, sy - self.monitor.top as f32);
-                    if self.launchpad.over_left(wx, wy) {
-                        self.launchpad.on_wheel_left(delta * 72.0 * self.scale);
+                    if let Some(ci) = self.launchpad.column_at(wx, wy) {
+                        self.launchpad.on_wheel_col(ci, delta * 72.0 * self.scale);
                     } else {
                         self.launchpad.on_wheel(delta * 72.0 * self.scale);
                     }
@@ -2655,6 +2745,7 @@ impl Dock {
         }
         let tray = self.tray_views();
         let wa = self.whatsapp_state();
+        let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
         let data = lp::Data {
@@ -2670,6 +2761,7 @@ impl Dock {
             user: &self.user_name,
             wifi: self.wifi.as_ref(),
             tray: &tray,
+            tray_list: &tray_list,
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
@@ -2788,6 +2880,7 @@ impl Dock {
         let reserve = self.geo.shelf_h + 2.0 * self.geo.margin;
         let tray = self.tray_views();
         let wa = self.whatsapp_state();
+        let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
         let data = lp::Data {
@@ -2803,6 +2896,7 @@ impl Dock {
             user: &self.user_name,
             wifi: self.wifi.as_ref(),
             tray: &tray,
+            tray_list: &tray_list,
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
@@ -2864,11 +2958,6 @@ impl Dock {
     fn lp_slider(&mut self, act: &Act, x: f32, commit: bool) {
         let Some(frac) = self.launchpad.slider_value(act, x) else { return };
         match act {
-            Act::Volume => {
-                self.control.volume = Some(frac);
-                self.services.send(Req::SetVolume(frac));
-                self.lp_render("all");
-            }
             Act::Slider(key) => {
                 let Some((min, max, step)) = Launchpad::slider_range(key) else { return };
                 let v = ((min + frac * (max - min)) / step).round() * step;
@@ -2890,7 +2979,6 @@ impl Dock {
         trace!("launchpad action {act:?}");
         match act {
             Act::Close => self.close_launchpad(),
-            Act::Tray(key) => self.tray_click(key, crate::tray::Click::Left),
             Act::App(id) => {
                 self.close_launchpad();
                 self.open_app(&id);
@@ -2999,10 +3087,6 @@ impl Dock {
                 self.close_launchpad();
                 apps::edit_file(&config::path());
             }
-            Act::WinSettings => {
-                self.close_launchpad();
-                apps::launch("ms-settings:");
-            }
             Act::Snip => {
                 self.close_launchpad();
                 apps::launch("ms-screenclip:");
@@ -3011,7 +3095,7 @@ impl Dock {
                 self.close_launchpad();
                 self.services.send(Req::Power(services::Power::Lock));
             }
-            Act::Volume | Act::Slider(_) | Act::Search | Act::Card(_) => {}
+            Act::Slider(_) | Act::Search | Act::Card(_) | Act::GalleryItem(_) => {}
             Act::Widget(_, a, frac) => self.widget_act(a, frac),
             Act::AddWidgets => {
                 self.launchpad.query.clear();
@@ -3048,6 +3132,8 @@ impl Dock {
 
     fn on_service_replies(&mut self) {
         let mut render = false;
+        // Live data (stats, controls, update status) redraws cards in place, not all of Launchpad.
+        let mut live = false;
         for r in self.services.take() {
             match r {
                 Reply::Apps(list) => {
@@ -3067,7 +3153,7 @@ impl Dock {
                     if sample {
                         self.control.wifi = Some(true);
                     }
-                    render = true;
+                    live = true;
                 }
                 Reply::Wifi(_) if self.opts.demo.as_deref() == Some("lp-wifi-sample") => {}
                 Reply::Wifi(w) => {
@@ -3078,13 +3164,13 @@ impl Dock {
                 Reply::Update(u) => {
                     trace!("windows update: {u:?}");
                     self.update = Some(u);
-                    render = true;
+                    live = true;
                 }
                 Reply::Stats(st) => {
                     self.hub.push_stats(&st);
                     self.stats = Some(st);
                     self.paint_dock_widgets(false);
-                    render = true;
+                    live = true;
                 }
                 Reply::Weather(w) => {
                     if w.is_some() {
@@ -3103,8 +3189,14 @@ impl Dock {
                 }
             }
         }
-        if render && self.launchpad.open && self.lp_drag.is_none() {
+        let busy = self.lp_drag.is_some() || self.launchpad.dragging();
+        if render && self.launchpad.open && !busy {
             self.lp_render("all");
+        } else if live && self.launchpad.open && !busy {
+            self.lp_render("live");
+            if self.launchpad.wifi_open {
+                self.lp_render("right");
+            }
         }
     }
 
@@ -3522,7 +3614,7 @@ impl Dock {
         self.stack_view.hide();
         trace!("drag start: item {i} {}", self.items[i].key);
         let width = self.geo.width[i];
-        self.drag = Some(Drag { index: i, insert: None, removing: false, width, merge: None, merge_ready: false, ext: None });
+        self.drag = Some(Drag { index: i, insert: None, removing: false, width, merge: None, merge_ready: false, ext: None, ext_widget: None });
         let _ = self.animate_amount(0.0, 120);
         let _ = self.show_label(None);
         let _ = self.slots[i].SetOpacity(0.0);
@@ -3551,7 +3643,7 @@ impl Dock {
         if let Err(e) = r {
             trace!("ghost failed: {e:?}");
         }
-        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(id.to_string()) });
+        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(id.to_string()), ext_widget: None });
         let _ = self.animate_amount(0.0, 120);
         if self.tucked {
             self.set_tucked(false);
@@ -3586,7 +3678,7 @@ impl Dock {
         if let Some(v) = self.wviews.get(&i).filter(|_| it.kind == Kind::Widget) {
             // Widgets: a copy of the widget (shrunk to fit the ghost window if it's wide).
             let k = (size / (v.w + 8.0 * s)).min(1.0);
-            let sp = crate::ui::surface_sprite(&c, &v.surface, v.w, v.h)?;
+            let sp = crate::ui::stretch_sprite(&c, &v.surface, v.w, v.h)?;
             sp.SetScale(crate::ui::v3(k, k, 1.0))?;
             sp.SetOffset(crate::ui::v3((size - v.w * k) / 2.0, (size - v.h * k) / 2.0, 0.0))?;
             g.body.Children()?.InsertAtTop(&sp)?;
@@ -3656,7 +3748,7 @@ impl Dock {
         let external = d.ext.is_some();
         let pinned = !external && self.items[i].pinned;
         let removing = pinned && y < self.geo.y0 - 90.0 * self.scale;
-        let is_app = external || self.items[i].kind == Kind::App;
+        let is_app = if external { d.ext_widget.is_none() } else { self.items[i].kind == Kind::App };
         // Holding an app over the middle of another pinned app or a stack makes/extends a stack.
         if is_app && !removing && y > self.geo.y0 - 20.0 * self.scale {
             let boundary = self.pinned_boundary();
@@ -3873,10 +3965,10 @@ impl Dock {
         if commit {
             if let Some(k) = d.insert {
                 self.hide_ghost(false);
-                let without: Vec<(usize, Pin)> = self.pinned_order().into_iter().filter(|(_, p)| p.app() != Some(id)).collect();
+                let without: Vec<(usize, Pin)> = self.pinned_order().into_iter().filter(|(_, p)| d.ext_widget.is_some() || p.app() != Some(id)).collect();
                 let pos = without.iter().filter(|(j, _)| *j < k).count();
                 let mut order: Vec<Pin> = without.into_iter().map(|(_, p)| p).collect();
-                order.insert(pos.min(order.len()), Pin::Id(id.to_string()));
+                order.insert(pos.min(order.len()), d.ext_widget.clone().unwrap_or_else(|| Pin::Id(id.to_string())));
                 self.apply_pin_order(order);
                 return;
             }
@@ -4283,6 +4375,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     d.services.send(Req::Weather(d.cfg.weather_lat, d.cfg.weather_lon));
                 }
                 T_WIDGETS => d.widget_tick(),
+                T_LP_HOLD => unsafe {
+                    let _ = KillTimer(Some(hwnd), T_LP_HOLD);
+                    // Held still: lift the card so it's clearly ready to move.
+                    if let Some((src, px, py)) = d.lpw_press.take() {
+                        if d.launchpad.open {
+                            d.lp_begin_drag(src, px, py);
+                            let mut pt = POINT::default();
+                            let _ = GetCursorPos(&mut pt);
+                            d.lp_drag_move((pt.x - d.monitor.left) as f32, (pt.y - d.monitor.top) as f32);
+                        }
+                    }
+                },
                 T_PREVIEW => unsafe {
                     let _ = KillTimer(Some(hwnd), T_PREVIEW);
                     if let Some(i) = d.preview_pending.take() {

@@ -1,11 +1,27 @@
 //! The dock's side of widgets: painting dock widgets, routing clicks from the dock and
-//! Launchpad, the once-a-second refresh, widget menus and the connect form.
+//! Launchpad, the once-a-second refresh, dragging widgets (in Launchpad and out to the
+//! dock), widget menus and the connect form.
 //! (A child module of `dock`, so it can use the dock's private state.)
 
 use super::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
-use crate::widgets::catalog::{Face, SysKind, TimerKind};
+use crate::config::WRef;
+use crate::launchpad::{DragSrc, WPos, Zone};
+use crate::widgets::catalog::{Face, Size, SysKind, TimerKind, ToolKind};
 use crate::widgets::{self, Now, WAct};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+/// Menu commands: widget sizes (base + size index).
+const CMD_SIZE_BASE: usize = 3900;
+/// Menu command: move a Launchpad widget to the other column.
+const CMD_LPW_OTHER_COL: usize = 3910;
+
+fn size_code(s: Size) -> usize {
+    match s {
+        Size::Small => 0,
+        Size::Medium => 1,
+        Size::Large => 2,
+    }
+}
 
 impl Dock {
     /// Is WhatsApp running, and does it want attention?
@@ -33,9 +49,11 @@ impl Dock {
             return;
         }
         let pinned = self.lp_pinned();
-        if idx.iter().any(|i| self.wviews.get(i).map(|v| matches!(v.def.face, Face::Tool(widgets::catalog::ToolKind::Apps))).unwrap_or(false)) {
+        if idx.iter().any(|i| self.wviews.get(i).map(|v| matches!(v.def.face, Face::Tool(ToolKind::Apps))).unwrap_or(false)) {
             self.lp_brushes(&pinned);
         }
+        let tray_views = if idx.iter().any(|i| self.wviews.get(i).map(|v| matches!(v.def.face, Face::Tool(ToolKind::Tray))).unwrap_or(false)) { self.tray_views() } else { Vec::new() };
+        let tray: Vec<(u64, String)> = tray_views.iter().map(|t| (t.key, t.tip.clone())).collect();
         let wa = self.whatsapp_state();
         let mut results = Vec::new();
         {
@@ -48,12 +66,15 @@ impl Dock {
                 pinned: &pinned,
                 names: &self.names,
                 whatsapp: wa,
+                tray: &tray,
+                hover_tray: None,
+                update: self.update.as_ref(),
                 sample: false,
                 now: Now::get(),
             };
             for i in idx {
                 let Some(v) = self.wviews.get(i) else { continue };
-                match widgets::render(&self.gfx, &v.surface, v.def, &ctx, v.w, v.h, self.scale, true) {
+                match widgets::render(&self.gfx, &v.surface, v.def, &ctx, v.w * v.res, v.h * v.res, self.scale * v.res, true) {
                     Ok(p) => results.push((*i, p)),
                     Err(e) => trace!("widget {} paint failed: {e:?}", v.def.id),
                 }
@@ -62,25 +83,25 @@ impl Dock {
         let c = self.compositor.clone();
         for (i, p) in results {
             let Some(v) = self.wviews.get_mut(&i) else { continue };
-            // App icons sit on top of the painted bitmap (they're Composition brushes).
+            // App and tray icons sit on top of the painted bitmap (they're Composition brushes).
             if let Ok(kids) = v.tile.Children() {
                 while kids.Count().unwrap_or(0) > 1 {
-                    if let Ok(top) = kids.First().and_then(|it| {
-                        let mut last = None;
-                        for k in it {
-                            last = Some(k);
+                    let last = kids.First().ok().and_then(|it| it.into_iter().last());
+                    match last {
+                        Some(top) => {
+                            let _ = kids.Remove(&top);
                         }
-                        last.ok_or_else(windows::core::Error::empty)
-                    }) {
-                        let _ = kids.Remove(&top);
-                    } else {
-                        break;
+                        None => break,
                     }
                 }
                 for (x, y, size, id) in &p.icons {
-                    if let Some(b) = self.brushes.get(id) {
+                    let brush = match id.strip_prefix("tray:").and_then(|k| k.parse::<u64>().ok()) {
+                        Some(k) => tray_views.iter().find(|t| t.key == k).and_then(|t| t.brush.clone()),
+                        None => self.brushes.get(id).cloned(),
+                    };
+                    if let Some(b) = brush {
                         if let Ok(sp) = c.CreateSpriteVisual() {
-                            let _ = sp.SetBrush(b);
+                            let _ = sp.SetBrush(&b);
                             let _ = sp.SetSize(v2(size * self.scale, size * self.scale));
                             let _ = sp.SetOffset(v3(x * self.scale, y * self.scale, 0.0));
                             let _ = kids.InsertAtTop(&sp);
@@ -96,8 +117,9 @@ impl Dock {
     pub(super) fn widget_click(&mut self, i: usize) {
         let Some(v) = self.wviews.get(&i) else { return };
         let (x, y) = self.ptr_xy;
-        let left = self.geo.item_left(x, if self.hovering { 1.0 } else { 0.0 }, i);
-        let (lx, ly) = ((x - left) / self.scale, (y - (self.geo.y0 + self.geo.p)) / self.scale);
+        let (left, top, sc) = self.geo.item_rect(x, if self.hovering { 1.0 } else { 0.0 }, i);
+        let k = self.scale * sc;
+        let (lx, ly) = ((x - left) / k, (y - top) / k);
         trace!("widget {} clicked at ({lx:.0}, {ly:.0})", v.def.id);
         if let Some((a, frac)) = v.painted.at(lx, ly) {
             self.widget_act(a, frac);
@@ -113,7 +135,6 @@ impl Dock {
                 apps::launch(&target);
             }
             WAct::Connect(conn) => self.open_connect(conn),
-            WAct::Launchpad => self.toggle_launchpad(),
             WAct::Search => {
                 if !self.launchpad.open {
                     self.open_launchpad();
@@ -139,9 +160,19 @@ impl Dock {
                 }
             }
             WAct::Wifi => self.lp_act(Act::Wifi),
+            WAct::WifiMenu => {
+                if !self.launchpad.open {
+                    self.open_launchpad();
+                }
+                self.lp_act(Act::WifiMenu);
+            }
             WAct::Bluetooth => self.lp_act(Act::Bluetooth),
             WAct::Dark => self.lp_act(Act::Dark),
             WAct::Mute => self.lp_act(Act::Mute),
+            WAct::Snip => self.lp_act(Act::Snip),
+            WAct::Lock => self.lp_act(Act::Lock),
+            WAct::Power => self.lp_act(Act::Power),
+            WAct::Tray(key) => self.tray_click(key, crate::tray::Click::Left),
             WAct::Mic => {
                 let m = !self.hub.mic_muted.unwrap_or(false);
                 self.hub.set_mic(m);
@@ -197,7 +228,7 @@ impl Dock {
         }
         self.paint_dock_widgets(true);
         if self.launchpad.open {
-            self.lp_render("left");
+            self.lp_render("live");
         }
     }
 
@@ -225,8 +256,8 @@ impl Dock {
             conns.extend(widgets::conns(v.def));
         }
         if self.launchpad.open {
-            for id in &self.cfg.launchpad_widgets {
-                if let Some(d) = widgets::catalog::get(id) {
+            for w in self.cfg.launchpad_widgets.iter().chain(self.cfg.right_widgets.iter()) {
+                if let Some(d) = widgets::catalog::get(w.id()) {
                     conns.extend(widgets::conns(d));
                 }
             }
@@ -265,17 +296,40 @@ impl Dock {
             .map(|(i, _)| *i)
             .collect();
         self.paint_dock_set(&due);
-        if self.launchpad.open && self.lp_drag.is_none() {
+        if self.launchpad.open && self.lp_drag.is_none() && !self.launchpad.dragging() {
             self.lp_render("live");
         }
     }
 
     pub(super) fn on_widget_replies(&mut self) {
+        let geo = self.hub.geocoded.take();
+        if let Some((city, res)) = geo {
+            match res {
+                Some((lat, lon, label)) => {
+                    trace!("weather location: {label}");
+                    let name = label.split(',').next().unwrap_or(&city).trim().to_string();
+                    self.save_and_apply(|c| {
+                        c.weather_city = name;
+                        c.weather_lat = lat;
+                        c.weather_lon = lon;
+                    });
+                    self.services.send(Req::Weather(lat, lon));
+                }
+                None => {
+                    if let Some(f) = self.launchpad.form.as_mut() {
+                        f.error = Some(format!("Couldn’t find “{city}”. Try another spelling or a nearby city."));
+                    }
+                }
+            }
+            if self.launchpad.open {
+                self.lp_render("all");
+            }
+        }
         if self.hub.take_replies() {
             self.paint_dock_widgets(true);
-            if self.launchpad.open && self.lp_drag.is_none() {
-                self.lp_render("left");
-                if self.launchpad.gallery.is_some() {
+            if self.launchpad.open && self.lp_drag.is_none() && !self.launchpad.dragging() {
+                self.lp_render("live");
+                if self.launchpad.gallery.is_some() || self.launchpad.settings.is_some() || self.launchpad.form.is_some() {
                     self.lp_render("center");
                 }
             }
@@ -287,14 +341,11 @@ impl Dock {
     pub(super) fn add_widget(&mut self, id: &'static str, to_dock: bool) {
         trace!("add widget {id} to {}", if to_dock { "dock" } else { "launchpad" });
         if to_dock {
-            self.save_and_apply(|c| {
-                // Before the trailing separators (at the end of the pinned apps).
-                c.pins.push(Pin::Widget { widget: id.to_string() });
-            });
+            self.save_and_apply(|c| c.pins.push(Pin::Widget { widget: id.to_string(), size: None }));
         } else {
             self.save_and_apply(|c| {
-                if !c.launchpad_widgets.iter().any(|w| w == id) {
-                    c.launchpad_widgets.push(id.to_string());
+                if !c.launchpad_widgets.iter().chain(c.right_widgets.iter()).any(|w| w.id() == id) {
+                    c.launchpad_widgets.push(WRef::Id(id.to_string()));
                 }
             });
         }
@@ -304,7 +355,217 @@ impl Dock {
     }
 
     pub(super) fn remove_lp_widget(&mut self, id: &str) {
-        self.save_and_apply(|c| c.launchpad_widgets.retain(|w| w != id));
+        self.save_and_apply(|c| {
+            c.launchpad_widgets.retain(|w| w.id() != id);
+            c.right_widgets.retain(|w| w.id() != id);
+        });
+        if self.launchpad.open {
+            self.lp_render("all");
+        }
+    }
+
+    fn column_mut(c: &mut Config, ci: usize) -> &mut Vec<WRef> {
+        if ci == 0 {
+            &mut c.launchpad_widgets
+        } else {
+            &mut c.right_widgets
+        }
+    }
+
+    fn column(&self, ci: usize) -> &Vec<WRef> {
+        if ci == 0 {
+            &self.cfg.launchpad_widgets
+        } else {
+            &self.cfg.right_widgets
+        }
+    }
+
+    // ------------------------------------------------------------ dragging from Launchpad
+
+    /// The window y (Launchpad coordinates) where the dock begins.
+    pub(super) fn dock_top_in_launchpad(&self) -> f32 {
+        let lp_top = self.monitor.top as f32;
+        let dock_top = (self.monitor.bottom - self.geo.win_h as i32) as f32 + self.geo.y0 - 12.0 * self.scale;
+        dock_top - lp_top
+    }
+
+    /// A press on a widget card or a gallery preview turned into a drag.
+    pub(super) fn lp_begin_drag(&mut self, src: DragSrc, x: f32, y: f32) {
+        let pinned = self.lp_pinned();
+        let tray = self.tray_views();
+        let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
+        let wa = self.whatsapp_state();
+        let app_version = crate::updater::version_label();
+        let app_update = self.update_status_line();
+        let data = lp::Data {
+            apps: &self.lp_apps,
+            brushes: &self.brushes,
+            pinned: &pinned,
+            names: &self.names,
+            control: &self.control,
+            stats: self.stats.as_ref(),
+            weather: self.weather.as_ref(),
+            files: &self.files,
+            cfg: &self.cfg,
+            user: &self.user_name,
+            wifi: self.wifi.as_ref(),
+            tray: &tray,
+            tray_list: &tray_list,
+            update: self.update.as_ref(),
+            app_version: &app_version,
+            app_update: &app_update,
+            hub: &self.hub,
+            whatsapp: wa,
+        };
+        let c = self.compositor.clone();
+        if let Err(e) = self.launchpad.begin_drag(&c, &self.gfx, &data, src, x, y) {
+            trace!("widget drag failed: {e:?}");
+        }
+        trace!("widget drag start: {src:?}");
+        unsafe {
+            SetCapture(self.launchpad.hwnd());
+            SetCursor(LoadCursorW(None, IDC_SIZEALL).ok());
+        }
+    }
+
+    /// The pointer moved during a Launchpad widget drag.
+    pub(super) fn lp_drag_move(&mut self, x: f32, y: f32) {
+        let c = self.compositor.clone();
+        let zone = self.launchpad.drag_move(&c, x, y, self.dock_top_in_launchpad());
+        unsafe {
+            SetCursor(LoadCursorW(None, IDC_SIZEALL).ok());
+        }
+        // Over the dock: the dock opens a gap and shows its own floating copy.
+        let in_dock = matches!(&self.drag, Some(d) if d.ext_widget.is_some());
+        if zone == Zone::Dock {
+            if !in_dock {
+                if let Some((_, def, size)) = self.launchpad.drag_info() {
+                    self.start_widget_drag(def, size);
+                }
+            }
+            let (sx, sy) = (x + self.monitor.left as f32, y + self.monitor.top as f32);
+            let win_top = (self.monitor.bottom - self.geo.win_h as i32) as f32;
+            self.drag_move(sx - self.monitor.left as f32, sy - win_top);
+        } else if in_dock {
+            if let Some(d) = self.drag.take() {
+                let id = d.ext.clone().unwrap_or_default();
+                self.end_external_drag(d, &id, false);
+            }
+        }
+    }
+
+    /// A widget from Launchpad enters the dock: open a gap for it and show it under the pointer.
+    fn start_widget_drag(&mut self, def: &'static widgets::Def, size: Size) {
+        let ww = widgets::dock_width(def, size, self.geo.b);
+        let width = ww + self.geo.g;
+        if let Err(e) = self.show_widget_ghost(def, size, ww) {
+            trace!("widget ghost failed: {e:?}");
+        }
+        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(format!("::widget:{}", def.id)), ext_widget: Some(Pin::Widget { widget: def.id.to_string(), size: (size != def.size).then_some(size) }) });
+        if self.tucked {
+            self.set_tucked(false);
+        }
+        self.hovering = true;
+        let _ = self.animate_amount(0.0, 120);
+        self.apply_region();
+    }
+
+    /// The floating copy of a widget while it's over the dock.
+    fn show_widget_ghost(&mut self, def: &'static widgets::Def, size: Size, ww: f32) -> Result<()> {
+        let c = self.compositor.clone();
+        if self.ghost.is_none() {
+            let popup = crate::ui::Popup::new(&c, false)?;
+            let body = c.CreateContainerVisual()?;
+            popup.root.Children()?.InsertAtTop(&body)?;
+            self.ghost = Some(Ghost { popup, body, size: 0 });
+        }
+        let s = self.scale;
+        let h = self.geo.b;
+        let surface = self.gfx.surface(ww, h)?;
+        let pinned = self.lp_pinned();
+        {
+            let ctx = widgets::Ctx {
+                hub: &self.hub,
+                cfg: &self.cfg,
+                weather: self.weather.as_ref(),
+                stats: self.stats.as_ref(),
+                control: &self.control,
+                pinned: &pinned,
+                names: &self.names,
+                whatsapp: None,
+                tray: &[],
+                hover_tray: None,
+                update: self.update.as_ref(),
+                sample: true,
+                now: Now::get(),
+            };
+            widgets::render(&self.gfx, &surface, def, &ctx, ww, h, s, true)?;
+        }
+        let _ = size;
+        let side = (ww.max(h) + 24.0 * s).ceil();
+        let g = self.ghost.as_mut().unwrap();
+        g.body.Children()?.RemoveAll()?;
+        g.size = side as i32;
+        g.body.SetSize(v2(side, side))?;
+        g.body.SetOpacity(0.95)?;
+        g.body.SetScale(v3(1.0, 1.0, 1.0))?;
+        let sp = crate::ui::surface_sprite(&c, &surface, ww, h)?;
+        sp.SetOffset(v3((side - ww) / 2.0, (side - h) / 2.0, 0.0))?;
+        g.body.Children()?.InsertAtTop(&sp)?;
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        let half = (side / 2.0) as i32;
+        g.popup.show(RECT { left: p.x - half, top: p.y - half, right: p.x + half, bottom: p.y + half }, false);
+        Ok(())
+    }
+
+    /// The button was released during a Launchpad widget drag: put the widget where it landed.
+    pub(super) fn lp_end_drag(&mut self) {
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        let dock_drop = matches!(&self.drag, Some(d) if d.ext_widget.is_some());
+        let Some((src, def, size, zone)) = self.launchpad.end_drag() else { return };
+        trace!("widget drag end: {src:?} -> {zone:?}");
+        if dock_drop && zone == Zone::Dock {
+            if let Some(d) = self.drag.take() {
+                let id = d.ext.clone().unwrap_or_default();
+                self.end_external_drag(d, &id, true);
+            }
+            // Moved out of a column: it now lives in the dock.
+            if let DragSrc::Col((ci, i)) = src {
+                self.save_and_apply(|c| {
+                    let col = Self::column_mut(c, ci);
+                    if i < col.len() {
+                        col.remove(i);
+                    }
+                });
+            }
+        } else if let Zone::Column(ci, k) = zone {
+            let entry = WRef::new(def.id, size);
+            self.save_and_apply(|c| {
+                // Control Center widgets exist once: a gallery drop moves the existing one.
+                let single = widgets::catalog::CONTROL.iter().any(|d| d.id == def.id);
+                let src = match src {
+                    DragSrc::Col(p) => Some(p),
+                    DragSrc::Gallery(_) if single => (0..2).find_map(|cc| Self::column_mut(c, cc).iter().position(|w| w.id() == def.id).map(|i| (cc, i))),
+                    DragSrc::Gallery(_) => None,
+                };
+                let item = match src {
+                    Some((sc, si)) if si < Self::column_mut(c, sc).len() => Self::column_mut(c, sc).remove(si),
+                    _ => entry,
+                };
+                let col = Self::column_mut(c, ci);
+                col.insert(k.min(col.len()), item);
+            });
+        } else if dock_drop {
+            if let Some(d) = self.drag.take() {
+                let id = d.ext.clone().unwrap_or_default();
+                self.end_external_drag(d, &id, false);
+            }
+        }
         if self.launchpad.open {
             self.lp_render("all");
         }
@@ -336,6 +597,14 @@ impl Dock {
             self.lp_render("center");
             return;
         }
+        // Weather: look the place up first (on a worker thread); saved when it's found.
+        if form.conn == "weather" {
+            let city = form.fields.first().map(|f| f.value.trim().to_string()).unwrap_or_default();
+            self.hub.geocode(city);
+            self.launchpad.form = None;
+            self.lp_render("all");
+            return;
+        }
         for f in form.fields.iter().filter(|f| f.secret && !f.value.trim().is_empty()) {
             if !laminar_sys::secrets::set(&form.conn, f.key, f.value.trim()) {
                 if let Some(fm) = self.launchpad.form.as_mut() {
@@ -359,11 +628,10 @@ impl Dock {
                 c.widget_settings.remove(&conn);
             }
         });
-        trace!("connector {} settings saved", form.conn);
+        trace!("widget settings saved: {}", form.conn);
         self.hub.reset(&form.conn);
         let cfg = self.cfg.clone();
-        let id: &str = &form.conn;
-        if let Some(info) = laminar_sys::connectors::info(id) {
+        if let Some(info) = laminar_sys::connectors::info(&form.conn) {
             self.hub.want(&cfg, &[info.id]);
         }
         self.launchpad.form = None;
@@ -387,10 +655,19 @@ impl Dock {
         self.paint_dock_widgets(true);
     }
 
+    // ------------------------------------------------------------ menus
+
+    fn size_items(&self, def: &widgets::Def, cur: Size) -> Vec<MenuItem> {
+        let _ = def;
+        Size::ALL.iter().map(|s| MenuItem::item(s.label(), CMD_SIZE_BASE + size_code(*s)).checked(*s == cur)).collect()
+    }
+
     /// Right-click on a Launchpad widget card.
-    pub(super) fn lp_widget_menu(&mut self, i: usize) {
-        let Some(def) = self.cfg.launchpad_widgets.get(i).and_then(|id| widgets::catalog::get(id)) else { return };
-        self.menu_lpw = Some(i);
+    pub(super) fn lp_widget_menu(&mut self, p: WPos) {
+        let Some(w) = self.column(p.0).get(p.1).cloned() else { return };
+        let Some(def) = widgets::catalog::get(w.id()) else { return };
+        self.menu_lpw = Some(p);
+        self.menu_widget = None;
         let mut items = vec![MenuItem::header(def.name.to_string())];
         if widgets::conns(def).iter().any(|c| laminar_sys::connectors::info(c).map(|i| !i.fields.is_empty()).unwrap_or(false)) {
             items.push(MenuItem::item("Connect…", CMD_LPW_CONNECT));
@@ -404,31 +681,50 @@ impl Dock {
                 items.push(MenuItem::item(format!("{mins} min"), CMD_TIMER_MIN_BASE + mins).checked(mins == cur));
             }
         }
-        if i > 0 {
+        items.push(MenuItem::sep());
+        items.extend(self.size_items(def, w.size()));
+        items.push(MenuItem::sep());
+        if p.1 > 0 {
             items.push(MenuItem::item("Move Up", CMD_LPW_UP));
         }
-        if i + 1 < self.cfg.launchpad_widgets.len() {
+        if p.1 + 1 < self.column(p.0).len() {
             items.push(MenuItem::item("Move Down", CMD_LPW_DOWN));
         }
-        items.push(MenuItem::item("Add to Dock", CMD_LPW_TO_DOCK));
-        items.push(MenuItem::sep());
-        items.push(MenuItem::item("Remove Widget", CMD_LPW_REMOVE).danger());
+        items.push(MenuItem::item(if p.0 == 0 { "Move to Right Column" } else { "Move to Left Column" }, CMD_LPW_OTHER_COL));
+        let pinned = widgets::catalog::PINNED.iter().any(|(_, id)| *id == def.id);
+        if !pinned {
+            items.push(MenuItem::item("Add to Dock", CMD_LPW_TO_DOCK));
+            items.push(MenuItem::sep());
+            items.push(MenuItem::item("Remove Widget", CMD_LPW_REMOVE).danger());
+        } else {
+            items.push(MenuItem::sep());
+            items.push(MenuItem::item("Turn Off in Settings…", CMD_LPW_REMOVE));
+        }
         self.menu_ctx = None;
         self.menu_open = true;
-        let mut p = POINT::default();
+        let mut pt = POINT::default();
         unsafe {
-            let _ = GetCursorPos(&mut p);
+            let _ = GetCursorPos(&mut pt);
         }
-        let _ = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, items, p, false, self.scale, self.monitor);
+        let _ = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, items, pt, false, self.scale, self.monitor);
+    }
+
+    /// Size items for a dock widget's menu.
+    pub(super) fn dock_size_items(&self, key: &str) -> Vec<MenuItem> {
+        match widget_of(key) {
+            Some(def) => self.size_items(def, widget_size(key)),
+            None => Vec::new(),
+        }
     }
 
     /// Menu commands for widgets. Returns true if handled.
     pub(super) fn widget_menu_command(&mut self, cmd: usize) -> bool {
         let dock_def = self.menu_widget.and_then(|n| match self.cfg.pins.get(n) {
-            Some(Pin::Widget { widget }) => widgets::catalog::get(widget),
+            Some(Pin::Widget { widget, .. }) => widgets::catalog::get(widget),
             _ => None,
         });
-        let lp_def = self.menu_lpw.and_then(|i| self.cfg.launchpad_widgets.get(i)).and_then(|id| widgets::catalog::get(id));
+        let lp = self.menu_lpw;
+        let lp_def = lp.and_then(|p| self.column(p.0).get(p.1)).and_then(|w| widgets::catalog::get(w.id()));
         let first_conn = |d: &widgets::Def| widgets::conns(d).into_iter().find(|c| laminar_sys::connectors::info(c).map(|i| !i.fields.is_empty()).unwrap_or(false));
         match cmd {
             CMD_WIDGET_REMOVE => {
@@ -442,7 +738,7 @@ impl Dock {
             }
             CMD_WIDGET_TO_LP => {
                 if let Some(d) = dock_def {
-                    if self.cfg.launchpad_widgets.iter().any(|w| w == d.id) {
+                    if self.cfg.launchpad_widgets.iter().chain(self.cfg.right_widgets.iter()).any(|w| w.id() == d.id) {
                         self.remove_lp_widget(d.id);
                     } else {
                         self.add_widget(d.id, false);
@@ -459,24 +755,51 @@ impl Dock {
                     self.widget_act(WAct::TimerReset(k), 0.0);
                 }
             }
-            CMD_LPW_RESET => {
-                if let Some(Face::Timer(k)) = lp_def.map(|d| d.face) {
-                    self.widget_act(WAct::TimerReset(k), 0.0);
+            c if (CMD_SIZE_BASE..CMD_SIZE_BASE + 3).contains(&c) => {
+                let size = Size::ALL[c - CMD_SIZE_BASE];
+                if let Some(n) = self.menu_widget {
+                    self.save_and_apply(|cfg| {
+                        if let Some(Pin::Widget { widget, size: sz }) = cfg.pins.get_mut(n) {
+                            let default = widgets::catalog::get(widget).map(|d| d.size);
+                            *sz = (Some(size) != default).then_some(size);
+                        }
+                    });
+                } else if let Some((ci, i)) = lp {
+                    self.save_and_apply(|cfg| {
+                        let col = Self::column_mut(cfg, ci);
+                        if let Some(w) = col.get_mut(i) {
+                            *w = WRef::new(&w.id().to_string(), size);
+                        }
+                    });
+                    self.lp_render("all");
                 }
             }
-            c if (CMD_TIMER_MIN_BASE..CMD_TIMER_MIN_BASE + 1000).contains(&c) => {
-                let mins = (c - CMD_TIMER_MIN_BASE) as u32;
-                if let Some(t) = self.hub.timers.get_mut(&TimerKind::Countdown) {
-                    t.reset(mins * 60);
-                }
-                self.paint_dock_widgets(true);
-                if self.launchpad.open {
-                    self.lp_render("left");
+            CMD_LPW_OTHER_COL => {
+                if let Some((ci, i)) = lp {
+                    self.save_and_apply(|cfg| {
+                        let from = Self::column_mut(cfg, ci);
+                        if i < from.len() {
+                            let w = from.remove(i);
+                            Self::column_mut(cfg, 1 - ci).push(w);
+                        }
+                    });
+                    self.lp_render("all");
                 }
             }
             CMD_LPW_REMOVE => {
                 if let Some(d) = lp_def {
-                    self.remove_lp_widget(d.id);
+                    if widgets::catalog::PINNED.iter().any(|(_, id)| *id == d.id) {
+                        self.lp_act(Act::OpenSettings);
+                        self.lp_act(Act::Section(4));
+                    } else if let Some((ci, i)) = lp {
+                        self.save_and_apply(|cfg| {
+                            let col = Self::column_mut(cfg, ci);
+                            if i < col.len() {
+                                col.remove(i);
+                            }
+                        });
+                        self.lp_render("all");
+                    }
                 }
             }
             CMD_LPW_TO_DOCK => {
@@ -489,12 +812,27 @@ impl Dock {
                     self.open_connect(c);
                 }
             }
+            CMD_LPW_RESET => {
+                if let Some(Face::Timer(k)) = lp_def.map(|d| d.face) {
+                    self.widget_act(WAct::TimerReset(k), 0.0);
+                }
+            }
+            c if (CMD_TIMER_MIN_BASE..CMD_TIMER_MIN_BASE + 1000).contains(&c) => {
+                let mins = (c - CMD_TIMER_MIN_BASE) as u32;
+                if let Some(t) = self.hub.timers.get_mut(&TimerKind::Countdown) {
+                    t.reset(mins * 60);
+                }
+                self.paint_dock_widgets(true);
+                if self.launchpad.open {
+                    self.lp_render("live");
+                }
+            }
             CMD_LPW_UP | CMD_LPW_DOWN => {
-                if let Some(i) = self.menu_lpw {
+                if let Some((ci, i)) = lp {
                     let j = if cmd == CMD_LPW_UP { i.wrapping_sub(1) } else { i + 1 };
-                    if j < self.cfg.launchpad_widgets.len() {
-                        self.save_and_apply(|c| c.launchpad_widgets.swap(i, j));
-                        self.lp_render("left");
+                    if j < self.column(ci).len() {
+                        self.save_and_apply(|c| Self::column_mut(c, ci).swap(i, j));
+                        self.lp_render("all");
                     }
                 }
             }

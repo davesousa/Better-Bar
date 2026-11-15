@@ -3,6 +3,30 @@
 //! Widget ids are saved in config.json (Launchpad list and dock pins), so don't rename them.
 
 use super::canvas::{gly, mono, Badge};
+use serde::{Deserialize, Serialize};
+
+/// A widget's size. In Launchpad: small = half a column wide, medium = a full column,
+/// large = a full column and twice as tall. In the dock: one icon, the widget's own
+/// width, or wider.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Size {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl Size {
+    pub const ALL: [Size; 3] = [Size::Small, Size::Medium, Size::Large];
+    pub fn label(self) -> &'static str {
+        match self {
+            Size::Small => "Small",
+            Size::Medium => "Medium",
+            Size::Large => "Large",
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cat {
@@ -20,6 +44,7 @@ pub enum Cat {
     Weather,
     Stocks,
     Clocks,
+    Control,
 }
 
 pub const CATS: &[(Cat, &str, &str)] = &[
@@ -37,6 +62,7 @@ pub const CATS: &[(Cat, &str, &str)] = &[
     (Cat::Weather, "Weather", "Conditions and forecasts."),
     (Cat::Stocks, "Stocks", "Markets and crypto."),
     (Cat::Clocks, "Clocks", "Time, dates and calendars, every style."),
+    (Cat::Control, "Control Center", "Wi-Fi, sound, background apps and Windows Update."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,6 +76,8 @@ pub enum ClockKind {
     Date,
     DayPage,
     Analog,
+    /// Analog face in a rounded square.
+    AnalogSquare,
     Segment,
     ClockWeather,
     Month,
@@ -114,6 +142,14 @@ pub enum ToolKind {
     ScreenTime,
     Timeline,
     WhatsApp,
+    /// Wi-Fi and Bluetooth.
+    Connectivity,
+    /// Dark mode, mute, snip and lock.
+    ControlTiles,
+    /// Windows Update status.
+    WinUpdate,
+    /// Opens Windows Settings.
+    WinSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -198,20 +234,24 @@ pub struct Def {
     pub about: &'static str,
     pub cats: &'static [Cat],
     pub face: Face,
-    /// Twice as tall in Launchpad.
-    pub tall: bool,
+    /// Size when first added.
+    pub size: Size,
     /// Width in the dock, in icon widths.
     pub dock_w: f32,
 }
 
 const fn w(id: &'static str, name: &'static str, about: &'static str, cats: &'static [Cat], face: Face) -> Def {
-    Def { id, name, about, cats, face, tall: false, dock_w: 2.6 }
+    Def { id, name, about, cats, face, size: Size::Medium, dock_w: 2.6 }
 }
 const fn tall(d: Def) -> Def {
-    Def { tall: true, ..d }
+    Def { size: Size::Large, ..d }
 }
+/// Width in the dock (icon widths) at medium size. Icon-sized widgets start small.
 const fn dock(d: Def, dock_w: f32) -> Def {
-    Def { dock_w, ..d }
+    Def { dock_w, size: if dock_w <= 1.0 { Size::Small } else { d.size }, ..d }
+}
+const fn small(d: Def) -> Def {
+    Def { size: Size::Small, ..d }
 }
 
 use Cat::*;
@@ -298,7 +338,6 @@ pub static ALL: &[Def] = &[
     dock(w("uptime", "Uptime", "Time since Windows started.", &[System], Face::Sys(SysKind::Uptime)), 2.0),
     w("brightness", "Brightness", "Monitor brightness (monitors that support DDC/CI). Click the bar to set it.", &[System], Face::Sys(SysKind::Brightness)),
     w("quick-toggles", "Quick Toggles", "Wi-Fi, Bluetooth, dark mode and mute.", &[System], Face::Tool(ToolKind::Toggles)),
-    dock(w("tray", "Background Apps", "Opens Launchpad's background apps.", &[System], Face::Tool(ToolKind::Tray)), 1.0),
     dock(w("dark-mode", "Dark Mode", "Switch Windows between light and dark.", &[System], Face::Tool(ToolKind::DarkMode)), 1.0),
     dock(w("focus", "Focus", "Opens Windows' Do Not Disturb and Focus settings.", &[System], Face::Tool(ToolKind::Focus)), 1.0),
     dock(w("notifications", "Notifications", "Opens the notification centre.", &[System], Face::Tool(ToolKind::Notifications)), 1.0),
@@ -365,20 +404,49 @@ pub static ALL: &[Def] = &[
     w("date", "Date", "Today's date, large.", &[Clocks], Face::Clock(ClockKind::Date)),
     dock(w("day-page", "Day Page", "A calendar page for today.", &[Clocks], Face::Clock(ClockKind::DayPage)), 1.0),
     dock(w("analog", "Analog Clock", "A clock face with a sweeping second hand.", &[Clocks], Face::Clock(ClockKind::Analog)), 1.0),
+    dock(w("analog-square", "Analog Square", "The analog clock in a rounded square.", &[Clocks], Face::Clock(ClockKind::AnalogSquare)), 1.0),
     w("segment-clock", "Segment Clock", "Seven-segment digits.", &[Clocks], Face::Clock(ClockKind::Segment)),
     w("clock-weather", "Clock & Weather", "Time and temperature together.", &[Clocks], Face::Clock(ClockKind::ClockWeather)),
     tall(w("month", "Calendar", "This month, with today marked.", &[Clocks], Face::Clock(ClockKind::Month))),
 ];
 
+/// Control Center widgets (the right column). Background Apps, Windows Update and
+/// Windows Settings are always shown unless turned off in Settings → Widgets.
+pub static CONTROL: &[Def] = &[
+    small(w("connectivity", "Wi-Fi & Bluetooth", "Turn Wi-Fi and Bluetooth on or off; click a name for networks or devices.", &[Control], Face::Tool(ToolKind::Connectivity))),
+    w("control-tiles", "Quick Controls", "Dark mode, mute, snip and lock.", &[Control], Face::Tool(ToolKind::ControlTiles)),
+    tall(w("background-apps", "Background Apps", "The icons apps put beside the clock. Click to open, right-click for the app's menu.", &[Control], Face::Tool(ToolKind::Tray))),
+    w("windows-update", "Windows Update", "Updates waiting or a restart needed. Click for Windows Update.", &[Control], Face::Tool(ToolKind::WinUpdate)),
+    small(w("windows-settings", "Windows Settings", "Opens Windows Settings.", &[Control], Face::Tool(ToolKind::WinSettings))),
+];
+
+/// Widgets that stay in Launchpad unless turned off in Settings → Widgets (config key, id).
+pub const PINNED: &[(&str, &str)] = &[("show_background_apps", "background-apps"), ("show_windows_update", "windows-update"), ("show_windows_settings", "windows-settings")];
+
+pub fn all() -> impl Iterator<Item = &'static Def> {
+    ALL.iter().chain(CONTROL.iter())
+}
+
 pub fn get(id: &str) -> Option<&'static Def> {
+    if let Some(d) = CONTROL.iter().find(|d| d.id == id) {
+        return Some(d);
+    }
     ALL.iter().find(|d| d.id == id)
 }
 
 pub fn in_cat(c: Cat) -> impl Iterator<Item = &'static Def> {
-    ALL.iter().filter(move |d| d.cats.contains(&c))
+    all().filter(move |d| d.cats.contains(&c))
 }
 
 /// Launchpad's widgets before the user changes anything (the four it always had).
-pub fn default_launchpad() -> Vec<String> {
-    ["clock", "weather-hourly", "resource-monitor", "month"].iter().map(|s| s.to_string()).collect()
+pub fn default_launchpad() -> Vec<crate::config::WRef> {
+    ["clock", "weather-hourly", "resource-monitor", "month"].iter().map(|s| crate::config::WRef::Id(s.to_string())).collect()
+}
+
+/// The right column before the user changes anything: what Control Center always had.
+pub fn default_right() -> Vec<crate::config::WRef> {
+    ["connectivity", "now-playing", "control-tiles", "audio-output", "background-apps", "windows-update", "windows-settings"]
+        .iter()
+        .map(|s| crate::config::WRef::Id(s.to_string()))
+        .collect()
 }

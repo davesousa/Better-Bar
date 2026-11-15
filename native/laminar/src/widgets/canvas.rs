@@ -333,7 +333,16 @@ impl<'a> Canvas<'a> {
     }
     /// A Segoe Fluent Icons glyph centred on (cx, cy).
     pub fn glyph(&self, g: &str, cx: f32, cy: f32, size: f32, c: Col) {
-        self.text(g, cx, cy - size * 0.68, size, 400, c, Align::Center, size * 2.0, Font::Icons);
+        // Centre the glyph's ink (what you see), not its text box: icon fonts sit glyphs
+        // at different heights in the line, which made icons look off-centre in circles.
+        let Some(l) = self.layout(g, size, 400, Font::Icons, Align::Left, size * 3.0) else { return };
+        let (mw, mh) = (size * 3.0, size * 2.0);
+        let Ok(o) = (unsafe { l.GetOverhangMetrics() }) else { return };
+        let (ink_l, ink_r, ink_t, ink_b) = (-o.left, mw + o.right, -o.top, mh + o.bottom);
+        let origin = pt(cx - (ink_l + ink_r) / 2.0, cy - (ink_t + ink_b) / 2.0);
+        if let Some(b) = self.brush(c) {
+            unsafe { self.dc.DrawTextLayout(origin, &l, &b, D2D1_DRAW_TEXT_OPTIONS_NONE) };
+        }
     }
 
     /// A service badge: rounded tile with a glyph or one or two letters.
