@@ -37,11 +37,16 @@ macro_rules! wait {
 
 pub mod apps;
 pub mod audio;
+pub mod connectors;
+pub mod display;
+pub mod feed;
 pub mod files;
+pub mod http;
 pub mod media;
 pub mod power;
 pub mod radios;
 pub mod search;
+pub mod secrets;
 pub mod stats;
 pub mod theme;
 pub mod update;

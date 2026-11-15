@@ -85,6 +85,23 @@ pub enum Act {
     Snip,
     Lock,
     Search,
+    /// Something inside Launchpad widget card i (with the click's 0..1 position across the hit).
+    Widget(usize, crate::widgets::WAct, f32),
+    /// Launchpad widget card i itself (press to drag; right-click for its menu).
+    Card(usize),
+    /// Open the widget gallery.
+    AddWidgets,
+    GalleryCat(usize),
+    CloseGallery,
+    /// Add a widget to Launchpad (false) or the dock (true).
+    AddWidget(&'static str, bool),
+    RemoveWidget(&'static str),
+    /// Show the connect form for a connector.
+    Connect(&'static str),
+    FormFocus(usize),
+    FormSave,
+    FormCancel,
+    FormDisconnect,
 }
 
 #[derive(Clone)]
@@ -95,6 +112,8 @@ struct Hit {
     radius: f32,
     highlight: bool,
     scroll: bool,
+    /// In the left (widget) column's scrolling list.
+    left: bool,
 }
 
 /// A search result row.
@@ -262,6 +281,9 @@ pub struct Data<'a> {
     pub wifi: Option<&'a std::result::Result<Vec<laminar_sys::radios::WifiNetwork>, u32>>,
     /// Tray icons ("background apps"), in the order apps added them.
     pub tray: &'a [TrayView],
+    /// Widget state (feeds, timers) and whether WhatsApp wants attention.
+    pub hub: &'a crate::widgets::Hub,
+    pub whatsapp: Option<bool>,
     /// Windows Update status (None until the first check finishes).
     pub update: Option<&'a laminar_sys::update::UpdateStatus>,
     /// Laminar's version and its update status, for Settings → About.
@@ -311,6 +333,19 @@ pub struct Launchpad {
     /// Each tray icon's name label (shown while hovered) and the label shown otherwise.
     tray_tips: Vec<(u64, SpriteVisual)>,
     tray_hint: Option<SpriteVisual>,
+    /// The centre panel shows the widget gallery (category index).
+    pub gallery: Option<usize>,
+    /// The centre panel shows a connector's form.
+    pub form: Option<Form>,
+    /// Widget cards in the left column.
+    cards: Vec<Card>,
+    left_inner: Option<ContainerVisual>,
+    /// Window rectangle of the left column's list, its scroll offset and content height.
+    left_view: (f32, f32, f32, f32),
+    left_scroll: f32,
+    left_content_h: f32,
+    /// A card being dragged to a new place.
+    reorder: Option<Reorder>,
 }
 
 fn inside(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
@@ -344,6 +379,14 @@ impl Launchpad {
             wifi_open: false,
             tray_tips: Vec::new(),
             tray_hint: None,
+            gallery: None,
+            form: None,
+            cards: Vec::new(),
+            left_inner: None,
+            left_view: (0.0, 0.0, 0.0, 0.0),
+            left_scroll: 0.0,
+            left_content_h: 0.0,
+            reorder: None,
         })
     }
 
@@ -364,6 +407,9 @@ impl Launchpad {
         self.sel = 0;
         self.scroll_y = 0.0;
         self.settings = None;
+        self.gallery = None;
+        self.reorder = None;
+        self.left_scroll = 0.0;
         let root = &self.popup.root;
         root.Children()?.RemoveAll()?;
         self.panels.clear();
@@ -430,6 +476,9 @@ impl Launchpad {
         if self.open {
             self.open = false;
             self.dragging = None;
+            self.form = None;
+            self.gallery = None;
+            self.reorder = None;
             self.popup.hide();
         }
     }
@@ -504,116 +553,18 @@ impl Launchpad {
     }
 
     fn hit(&mut self, id: PanelId, r: (f32, f32, f32, f32), act: Act, radius: f32, highlight: bool, scroll: bool) {
-        self.hits.push((id, Hit { r, act, radius, highlight, scroll }));
+        self.hits.push((id, Hit { r, act, radius, highlight, scroll, left: false }));
+    }
+
+    /// A hit in the left column's scrolling widget list (content coordinates).
+    fn hit_left(&mut self, r: (f32, f32, f32, f32), act: Act, radius: f32, highlight: bool) {
+        self.hits.push((PanelId::Left, Hit { r, act, radius, highlight, scroll: false, left: true }));
     }
 
     // ------------------------------------------------------------ left: widgets
 
     fn render_left(&mut self, c: &Compositor, gfx: &Gfx, d: &Data) -> Result<()> {
-        let Some((content, pw, ph, ox, oy)) = self.panel(PanelId::Left).map(|(p, (x, y))| (p.content.clone(), p.w, p.h, x, y)) else { return Ok(()) };
-        self.clear_hits(PanelId::Left);
-        content.Children()?.RemoveAll()?;
-        let s = self.scale;
-        let pad = 16.0 * s;
-        let cw = pw - 2.0 * pad;
-        let mut y = pad;
-        let card = theme::ink(0.06);
-        let now = local_time();
-
-        // Clock
-        let ch = 132.0 * s;
-        Self::rect(c, &content, pad, y, cw, ch, 20.0 * s, card)?;
-        let (h12, ampm) = (if now.hour % 12 == 0 { 12 } else { now.hour % 12 }, if now.hour < 12 { "AM" } else { "PM" });
-        let (tw, _) = Self::txt(c, gfx, &content, &format!("{}:{:02}", h12, now.minute), TextStyle { px: 56.0 * s, weight: 300, display: true, ..Default::default() }, pad + 16.0 * s, y + 10.0 * s)?;
-        Self::txt(c, gfx, &content, ampm, TextStyle { px: 18.0 * s, color: theme::text_3(), ..Default::default() }, pad + 22.0 * s + tw, y + 44.0 * s)?;
-        Self::txt(c, gfx, &content, &now.date_line(), TextStyle { px: 14.0 * s, color: theme::text_2(), ..Default::default() }, pad + 18.0 * s, y + 88.0 * s)?;
-        y += ch + 12.0 * s;
-
-        // Weather
-        let wh = 150.0 * s;
-        Self::rect(c, &content, pad, y, cw, wh, 20.0 * s, rgba(64, 128, 246, 0.55))?;
-        Self::txt(c, gfx, &content, &d.cfg.weather_city, TextStyle { px: 14.0 * s, weight: 600, ..Default::default() }, pad + 16.0 * s, y + 12.0 * s)?;
-        match d.weather {
-            Some(w) => {
-                Self::txt(c, gfx, &content, &format!("{:.0}°", w.temp_c), TextStyle { px: 44.0 * s, weight: 300, display: true, ..Default::default() }, pad + 14.0 * s, y + 30.0 * s)?;
-                let (dw, _) = Self::txt(c, gfx, &content, &w.description, TextStyle { px: 12.5 * s, max_w: Some(cw * 0.5), ..Default::default() }, 0.0, -1000.0)?;
-                Self::txt(c, gfx, &content, &w.description, TextStyle { px: 12.5 * s, max_w: Some(cw * 0.5), ..Default::default() }, pad + cw - 16.0 * s - dw, y + 16.0 * s)?;
-                let hl = format!("H:{:.0}°  L:{:.0}°", w.high_c, w.low_c);
-                let (hw, _) = Self::txt(c, gfx, &content, &hl, TextStyle { px: 12.5 * s, ..Default::default() }, 0.0, -1000.0)?;
-                Self::txt(c, gfx, &content, &hl, TextStyle { px: 12.5 * s, ..Default::default() }, pad + cw - 16.0 * s - hw, y + 36.0 * s)?;
-                let n = w.hourly.len().min(6);
-                let colw = (cw - 24.0 * s) / 6.0;
-                for (k, (hr, t, _)) in w.hourly.iter().take(n).enumerate() {
-                    let cx = pad + 12.0 * s + colw * k as f32;
-                    let label = if k == 0 { "Now".to_string() } else { format!("{}{}", if hr % 12 == 0 { 12 } else { hr % 12 }, if *hr < 12 { "a" } else { "p" }) };
-                    Self::txt(c, gfx, &content, &label, TextStyle { px: 11.0 * s, color: theme::text_2(), center: true, max_w: Some(colw), ..Default::default() }, cx, y + 96.0 * s)?;
-                    Self::txt(c, gfx, &content, &format!("{:.0}°", t), TextStyle { px: 13.0 * s, weight: 500, center: true, max_w: Some(colw), ..Default::default() }, cx, y + 116.0 * s)?;
-                }
-            }
-            None => {
-                Self::txt(c, gfx, &content, "Fetching weather…", TextStyle { px: 13.0 * s, color: theme::text_2(), ..Default::default() }, pad + 16.0 * s, y + 60.0 * s)?;
-            }
-        }
-        y += wh + 12.0 * s;
-
-        // System
-        let sh = 150.0 * s;
-        Self::rect(c, &content, pad, y, cw, sh, 20.0 * s, card)?;
-        Self::txt(c, gfx, &content, "System", TextStyle { px: 12.5 * s, weight: 600, color: theme::text_2(), ..Default::default() }, pad + 16.0 * s, y + 12.0 * s)?;
-        let rows: Vec<(&str, f32, String)> = match d.stats {
-            Some(st) => vec![
-                ("CPU", st.cpu_percent / 100.0, format!("{:.0}%", st.cpu_percent)),
-                ("Memory", if st.mem_total_gb > 0.0 { st.mem_used_gb / st.mem_total_gb } else { 0.0 }, format!("{:.1} GB", st.mem_used_gb)),
-                ("Disk C:", st.disk_c_used_percent / 100.0, format!("{:.0}%", st.disk_c_used_percent)),
-                ("Network", 0.0, format!("↓ {}  ↑ {}", rate(st.net_down_bps), rate(st.net_up_bps))),
-            ],
-            None => vec![("CPU", 0.0, "…".into()), ("Memory", 0.0, "…".into()), ("Disk C:", 0.0, "…".into()), ("Network", 0.0, "…".into())],
-        };
-        for (k, (name, frac, val)) in rows.iter().enumerate() {
-            let ry = y + 40.0 * s + k as f32 * 26.0 * s;
-            Self::txt(c, gfx, &content, name, TextStyle { px: 12.0 * s, color: theme::text_2(), ..Default::default() }, pad + 16.0 * s, ry)?;
-            if *name != "Network" {
-                let (bx, bw) = (pad + 84.0 * s, cw - 84.0 * s - 76.0 * s);
-                Self::rect(c, &content, bx, ry + 6.0 * s, bw, 6.0 * s, 3.0 * s, theme::ink(0.12))?;
-                if *frac > 0.0 {
-                    Self::rect(c, &content, bx, ry + 6.0 * s, (bw * frac.clamp(0.0, 1.0)).max(6.0 * s), 6.0 * s, 3.0 * s, theme::accent())?;
-                }
-                let (vw, _) = Self::txt(c, gfx, &content, val, TextStyle { px: 12.0 * s, weight: 500, ..Default::default() }, 0.0, -1000.0)?;
-                Self::txt(c, gfx, &content, val, TextStyle { px: 12.0 * s, weight: 500, ..Default::default() }, pad + cw - 16.0 * s - vw, ry)?;
-            } else {
-                Self::txt(c, gfx, &content, val, TextStyle { px: 12.0 * s, color: theme::text_2(), ..Default::default() }, pad + 84.0 * s, ry)?;
-            }
-        }
-        y += sh + 12.0 * s;
-
-        // Calendar
-        let calh = 238.0 * s;
-        if y + calh < ph - pad {
-            Self::rect(c, &content, pad, y, cw, calh, 20.0 * s, card)?;
-            Self::txt(c, gfx, &content, &now.month_name(), TextStyle { px: 13.5 * s, weight: 600, ..Default::default() }, pad + 16.0 * s, y + 12.0 * s)?;
-            let yr = now.year.to_string();
-            let (yw, _) = Self::txt(c, gfx, &content, &yr, TextStyle { px: 13.5 * s, weight: 600, ..Default::default() }, 0.0, -1000.0)?;
-            Self::txt(c, gfx, &content, &yr, TextStyle { px: 13.5 * s, weight: 600, color: (1.0, 0.27, 0.23, 1.0), ..Default::default() }, pad + cw - 16.0 * s - yw, y + 12.0 * s)?;
-            let colw = (cw - 24.0 * s) / 7.0;
-            for (k, dname) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
-                Self::txt(c, gfx, &content, dname, TextStyle { px: 10.5 * s, weight: 600, color: theme::text_3(), center: true, max_w: Some(colw), ..Default::default() }, pad + 12.0 * s + colw * k as f32, y + 42.0 * s)?;
-            }
-            let first_dow = now.first_weekday_of_month();
-            let days = now.days_in_month();
-            for day in 1..=days {
-                let idx = first_dow + day - 1;
-                let (col, row) = (idx % 7, idx / 7);
-                let cx = pad + 12.0 * s + colw * col as f32;
-                let cy = y + 64.0 * s + row as f32 * 28.0 * s;
-                if day == now.day {
-                    let dd = 24.0 * s;
-                    Self::rect(c, &content, cx + (colw - dd) / 2.0, cy - 3.0 * s, dd, dd, dd / 2.0, rgba(255, 69, 58, 1.0))?;
-                }
-                Self::txt(c, gfx, &content, &day.to_string(), TextStyle { px: 12.0 * s, weight: if day == now.day { 600 } else { 400 }, center: true, max_w: Some(colw), ..Default::default() }, cx, cy)?;
-            }
-        }
-        let _ = (ox, oy);
-        Ok(())
+        self.render_widget_column(c, gfx, d)
     }
 
     // ------------------------------------------------------------ centre: search, apps, settings
@@ -625,6 +576,12 @@ impl Launchpad {
         let s = self.scale;
         let pad = 22.0 * s;
 
+        if self.form.is_some() {
+            return self.render_form(c, gfx, d, &content, (ox, oy), pw, ph);
+        }
+        if let Some(cat) = self.gallery {
+            return self.render_gallery(c, gfx, d, &content, (ox, oy), pw, ph, cat);
+        }
         if let Some(sec) = self.settings {
             return self.render_settings(c, gfx, d, &content, (ox, oy), pw, ph, sec);
         }
@@ -1282,7 +1239,12 @@ impl Launchpad {
     fn hit_at(&self, x: f32, y: f32) -> Option<usize> {
         let (vx, vy, vw, vh) = self.scroll_view;
         self.hits.iter().position(|(_, h)| {
-            if h.scroll {
+            if h.left {
+                if !inside(self.left_view, x, y) {
+                    return false;
+                }
+                inside((h.r.0, h.r.1 - self.left_scroll, h.r.2, h.r.3), x, y)
+            } else if h.scroll {
                 if !inside((vx, vy, vw, vh), x, y) {
                     return false;
                 }
@@ -1314,7 +1276,13 @@ impl Launchpad {
         let o: CompositionObject = shape.cast().unwrap();
         match h.map(|i| self.hits[i].1.clone()) {
             Some(hit) if hit.highlight => {
-                let r = if hit.scroll { (hit.r.0, hit.r.1 - self.scroll_y, hit.r.2, hit.r.3) } else { hit.r };
+                let r = if hit.left {
+                    (hit.r.0, hit.r.1 - self.left_scroll, hit.r.2, hit.r.3)
+                } else if hit.scroll {
+                    (hit.r.0, hit.r.1 - self.scroll_y, hit.r.2, hit.r.3)
+                } else {
+                    hit.r
+                };
                 let _ = geom.SetSize(v2(r.2, r.3));
                 let _ = geom.SetCornerRadius(v2(hit.radius, hit.radius));
                 let _ = shape.SetSize(v2(r.2, r.3));
@@ -1330,7 +1298,12 @@ impl Launchpad {
     /// Which action is under (x, y); clicks outside every panel close Launchpad.
     pub fn act_at(&self, x: f32, y: f32) -> Option<Act> {
         if let Some(i) = self.hit_at(x, y) {
-            return Some(self.hits[i].1.act.clone());
+            let h = &self.hits[i].1;
+            if let Act::Widget(k, a, _) = &h.act {
+                let frac = ((x - h.r.0) / h.r.2).clamp(0.0, 1.0);
+                return Some(Act::Widget(*k, a.clone(), frac));
+            }
+            return Some(h.act.clone());
         }
         let in_panel = self.panels.iter().any(|(_, p, (px, py))| inside((*px, *py, p.w, p.h), x, y));
         if in_panel {
@@ -1388,6 +1361,7 @@ impl Launchpad {
             return false;
         }
         self.settings = None;
+        self.gallery = None;
         self.query.push(ch);
         self.sel = 0;
         self.scroll_y = 0.0;
@@ -1422,52 +1396,7 @@ fn short_name(id: &str) -> String {
     base.trim_end_matches(".exe").to_string()
 }
 
-fn rate(bps: f64) -> String {
-    if bps >= 1_000_000.0 {
-        format!("{:.1} MB/s", bps / 1_000_000.0)
-    } else {
-        format!("{:.0} KB/s", bps / 1000.0)
-    }
-}
-
-/// Local date and time (from Windows, so it matches the system clock and time zone).
-pub struct LocalTime {
-    pub year: u32,
-    pub month: u32,
-    pub day: u32,
-    pub weekday: u32,
-    pub hour: u32,
-    pub minute: u32,
-}
-
-pub fn local_time() -> LocalTime {
-    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    LocalTime { year: t.wYear as u32, month: t.wMonth as u32, day: t.wDay as u32, weekday: t.wDayOfWeek as u32, hour: t.wHour as u32, minute: t.wMinute as u32 }
-}
-
-impl LocalTime {
-    pub fn month_name(&self) -> String {
-        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][(self.month - 1) as usize].to_string()
-    }
-    pub fn date_line(&self) -> String {
-        let wd = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][self.weekday as usize];
-        format!("{wd}, {} {}", self.month_name(), self.day)
-    }
-    pub fn days_in_month(&self) -> u32 {
-        match self.month {
-            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-            4 | 6 | 9 | 11 => 30,
-            _ => {
-                if (self.year % 4 == 0 && self.year % 100 != 0) || self.year % 400 == 0 {
-                    29
-                } else {
-                    28
-                }
-            }
-        }
-    }
-    /// 0 = Sunday.
-    pub fn first_weekday_of_month(&self) -> u32 {
-        (self.weekday + 35 - ((self.day - 1) % 7)) % 7
-    }
-}
+// Widget column, gallery and connect form.
+#[path = "launchpad_widgets.rs"]
+mod launchpad_widgets;
+pub use launchpad_widgets::{Card, Form, Reorder};

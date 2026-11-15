@@ -24,6 +24,7 @@ mod tracker;
 mod tray;
 mod ui;
 mod updater;
+mod widgets;
 mod winkey;
 
 use windows::core::Result;

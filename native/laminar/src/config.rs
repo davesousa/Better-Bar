@@ -17,6 +17,8 @@ pub const SEPARATOR: &str = "|";
 pub enum Pin {
     Id(String),
     Stack { stack: String, apps: Vec<String> },
+    /// A widget in the dock: `{ "widget": "clock" }` (ids in widgets/catalog.rs).
+    Widget { widget: String },
 }
 
 impl Pin {
@@ -90,6 +92,11 @@ pub struct Config {
     pub weather_city: String,
     pub weather_lat: f32,
     pub weather_lon: f32,
+    /// Widgets in Launchpad's left column, top to bottom (ids in widgets/catalog.rs).
+    pub launchpad_widgets: Vec<String>,
+    /// Widget and connector settings that aren't secret, by connector id
+    /// (e.g. "github": {"username": "…"}). API keys live in Windows Credential Manager.
+    pub widget_settings: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 
     /// Pinned apps, left to right. Each entry is an AppUserModelID (as used by
     /// `shell:AppsFolder`) or a full .exe path; `"|"` is a separator; an object is a stack.
@@ -127,6 +134,8 @@ impl Default for Config {
             weather_city: "Toronto".into(),
             weather_lat: 43.65,
             weather_lon: -79.38,
+            launchpad_widgets: crate::widgets::catalog::default_launchpad(),
+            widget_settings: Default::default(),
             pins: Vec::new(),
         }
     }
@@ -169,6 +178,9 @@ impl Config {
         self.edge_highlight = self.edge_highlight.clamp(0.0, 1.0);
         self.reveal_zone = self.reveal_zone.clamp(1.0, 40.0);
         self.extra_blur = self.extra_blur.clamp(0.0, 40.0);
+        // Forget widgets this version doesn't know (e.g. after a downgrade).
+        self.launchpad_widgets.retain(|w| crate::widgets::catalog::get(w).is_some());
+        self.pins.retain(|p| !matches!(p, Pin::Widget { widget } if crate::widgets::catalog::get(widget).is_none()));
         // Pins saved before version-folder handling point into a folder an update deletes.
         // (In memory only: the next save writes the stable path.)
         let fix = |s: &mut String| {
@@ -180,6 +192,7 @@ impl Config {
             match p {
                 Pin::Id(s) => fix(s),
                 Pin::Stack { apps, .. } => apps.iter_mut().for_each(fix),
+                Pin::Widget { .. } => {}
             }
         }
         self

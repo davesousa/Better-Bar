@@ -233,3 +233,33 @@ pub fn set_session_volume(pid: u32, v: f32) -> bool {
     }
     any
 }
+
+/// Volume control of the default capture (microphone) endpoint: the communications
+/// role first (what calls use), else the console role.
+fn mic_endpoint_volume() -> Option<IAudioEndpointVolume> {
+    use windows::Win32::Media::Audio::eCapture;
+    let en = enumerator()?;
+    unsafe {
+        let dev = en.GetDefaultAudioEndpoint(eCapture, eCommunications).or_else(|_| en.GetDefaultAudioEndpoint(eCapture, eConsole)).ok()?;
+        dev.Activate(CLSCTX_ALL, None).ok()
+    }
+}
+
+/// Mute state of the default microphone; `None` if there is no capture device.
+pub fn mic_muted() -> Option<bool> {
+    unsafe { mic_endpoint_volume()?.GetMute().ok().map(|b| b.as_bool()) }
+}
+
+/// Mutes/unmutes the default microphone. Returns success.
+pub fn set_mic_muted(m: bool) -> bool {
+    let Some(ev) = mic_endpoint_volume() else { return false };
+    unsafe { ev.SetMute(m, std::ptr::null()).is_ok() }
+}
+
+/// Friendly name of the default output device (console role), e.g. "Speakers (Realtek(R) Audio)".
+pub fn default_output_name() -> Option<String> {
+    unsafe {
+        let name = default_device()?.OpenPropertyStore(STGM_READ).ok()?.GetValue(&PKEY_Device_FriendlyName).ok()?.to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}

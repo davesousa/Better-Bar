@@ -71,7 +71,7 @@ All data is fake. Windows, files, networks, devices and tray apps are stand-ins.
 | 2. Dock depth | Live previews (DWM thumbnails), stacks, drag apps in, drop files on icons | Feature parity with this prototype's dock | ✅ built and agent-tested |
 | 3. Launchpad: centre | App list (`shell:AppsFolder`), fuzzy search, Windows Search for files | Finds any installed app or file quickly | ✅ built and agent-tested |
 | 4. Launchpad: right | Control center, tray icon hosting | All tray apps reachable without the Windows taskbar | ✅ built: controls, tray icons (Background Apps) and Windows Update status. ⚠️ Tray clicks need Dave's hand test. |
-| 5. Launchpad: left, settings, polish | Widgets, Settings window, motion polish | Settings in this prototype all work natively | ✅ built: widgets, Settings, light theme, extra blur. ❌ Refraction: Windows refuses it (see below). |
+| 5. Launchpad: left, settings, polish | Widgets, Settings window, motion polish | Settings in this prototype all work natively | ✅ built: widgets, Settings, light theme, extra blur. ❌ Refraction: Windows refuses it (see below). 2026-11-15: widget gallery (106 widgets, connectors, dock widgets, drag to reorder). |
 
 ## Overnight build status (2026-11-08)
 
@@ -222,6 +222,38 @@ Checked on this PC (2026-11-11): builds with no warnings; `vpk pack` made Setup.
 
 First release (2026-11-12): [v0.1.0](https://github.com/davesousa/Better-Bar/releases/tag/v0.1.0), published by the workflow on its first run. ✅ The release has Setup.exe, the full package and `releases.win.json`; the update check run as an installed 0.0.1 is offered 0.1.0, and as 0.1.0 is told it's up to date.
 
+### Widgets and the new Start button (2026-11-15)
+
+Dave's request: rebuild the widgets after a reference gallery of ~110 widgets in 14 categories, add connectors to outside services, let widgets be reordered by dragging and added to the dock, and replace the Start icon with a calmer Windows-style mark that has a subtle hover animation.
+
+| Task | How |
+| --- | --- |
+| Add a widget | Launchpad → **+ Add** (top of the left column). Pick a category, then **+ Launchpad** or **+ Dock**. Previews show your real data where no setup is needed, sample data otherwise. |
+| Reorder | Launchpad: drag a widget card up or down. Dock: drag a widget along the dock, like an app. |
+| Remove, move, connect | Right-click a widget card in Launchpad (Connect…, Move Up/Down, Add to Dock, Remove) or a widget in the dock (Connect…, Show in Launchpad, Remove from Dock). Dragging a dock widget up and off removes it. |
+| Connect a service | **Connect…** on the widget, or click a widget that says it needs setup. Paste the key (Ctrl+V), Enter saves. **Where do I get this?** opens the service's key page. |
+| Timer length | Right-click the Timer widget → 1–60 min. Pomodoro alternates 25-minute focus and 5-minute breaks; Stopwatch resets from its menu. |
+
+| Part | How it works |
+| --- | --- |
+| Catalog | 106 widgets: AI (8), Productivity (9), Finance (13), System (22), Media & Audio (6), Analytics (4), Developer (4), Online & Mail (6), Social (4), Apps & Files (7), Weather (6), Stocks (3), Clocks (12), plus a Highlights tab. Ids are saved in config.json, so they're fixed. Service marks are original letter or glyph tiles in each service's colours, not their logos. |
+| Drawing | Each widget is one Direct2D bitmap with a full Launchpad layout and a compact dock layout (one icon tall, not magnified). Clocks, timers and live stats redraw in place each second; others redraw when their data arrives. Light and dark themes both work. |
+| Connectors | `laminar-sys/src/connectors/`: 30 web services and 9 local sources, all returning one shape (`feed.rs`). Web calls use WinHTTP (`http.rs`) on worker threads; each refreshes on its own schedule (2 s to 6 h). |
+| Keys | API keys, tokens and private calendar links are stored in **Windows Credential Manager** (`LaminarDock:<service>:<field>`), never in config.json, and are only sent to their own service. Plain settings (usernames, site ids, symbols) go in config.json under `widget_settings`. |
+| Settings | config.json: `launchpad_widgets` (left column, top to bottom) and dock pins `{ "widget": "clock" }`. The four old Launchpad widgets are now catalog widgets (Clock, Today's Forecast, Resource Monitor, Calendar) and are the default column. |
+| Screen time | Counted by the dock (the app in front, only while you've used the mouse or keyboard in the last 2 minutes), saved to `%APPDATA%\Laminar\screentime.json`. Starts from zero on this version. |
+| Start button | Four rounded panes on a quiet frosted tile (no colour gradient), drawn as vector shapes, so it stays crisp when magnified. It follows the light/dark theme. On hover the panes ease apart and shrink slightly, one after another (45 ms apart, 420 ms). Nothing moves if Windows' **Animation effects** is off. |
+
+| Connector status | Services |
+| --- | --- |
+| ✅ Working live on this PC (2026-11-15) | Weather (Open-Meteo), stocks (Yahoo Finance), crypto (CoinGecko), GitHub (public contribution graph), LeetCode, Bing wallpaper, calendar (tested with a public Google iCal link), and all local sources: top CPU/memory, storage, Claude Code usage (from `~\.claude` logs; the cost is an estimate from list prices), keyboard language, uptime, microphone, monitor brightness (DDC/CI) |
+| ⚠️ Built and unit-tested on sample responses; needs your keys to try for real | Anthropic and OpenAI admin cost APIs, OpenRouter (needs a management key), Cursor, Stripe, Lemon Squeezy, Paddle, Shopify, Gumroad, Polar, RevenueCat, Plausible, Umami, Search Console and Gmail (Google OAuth client + refresh token), Linear, Resend, Supabase, Vercel, X (paid API tier), YouTube, TikTok, Instagram |
+| ⚠️ Not confirmed against current docs | OpenAI costs (docs page refused), Umami response shape, Supabase `interval` values, RevenueCat metric names, Lemon Squeezy sort order, Gumroad Bearer auth, Instagram host split |
+| ⚠️ Local, no data here | Codex CLI (format written from documentation; this PC's only log is empty), Battery (this PC has none) |
+| No public API, so the widget does something honest instead | WhatsApp (shows a dot when WhatsApp flashes for attention, like the dock does; no unread count), Focus/Do Not Disturb (opens Windows' settings) |
+
+Checked (agent, 2026-11-15, debug build beside Dave's dock with a copied settings folder, so Dave's config.json was never written): builds with no warnings; 61 tests pass; Launchpad column with live data; all 14 gallery categories; the connect form; dragging a card from 5th to 2nd (lifted card follows the pointer, others make room, order saved); clicking the dock Pomodoro starts it; dragging a dock widget reorders the pins; Start hover; light theme. ⚠️ Not yet tried by hand: saving a real key through the form, typing and pasting in the form with a real keyboard, every widget's buttons, dock widgets on the 4K helper display, and the release build (Dave's running dock locks `target\release\laminar.exe`; quit it first, then `cargo build --release`).
+
 ### Known gaps
 
 - Tray icons (the apps normally beside the clock) aren't hosted yet, and there's no Windows Update status. *(Done 2026-11-10.)*
@@ -330,6 +362,6 @@ Bugs found and fixed while testing: expression strings got "too long" with ~20 i
 ## Later / to-do
 
 - Brightness control in the control center. Deferred because the test machine is a desktop. External monitors will need DDC/CI.
-- Widget gallery and "Edit Controls" customization.
+- "Edit Controls" customization of the right panel. *(Widget gallery done 2026-11-15.)*
 - Reordering pinned apps inside Launchpad by dragging.
 - Focus / Do Not Disturb has no public Windows API; needs investigation.

@@ -22,8 +22,33 @@ pub struct Weather {
     pub description: String,
     pub high_c: f32,
     pub low_c: f32,
-    /// Next 6 full hours after now (local time of the location): (hour 0-23, temp °C, WMO code).
+    /// Next 8 full hours after now (local time of the location): (hour 0-23, temp °C, WMO code).
     pub hourly: Vec<(u8, f32, i32)>,
+    /// "Feels like" temperature.
+    #[serde(default)]
+    pub feels_c: f32,
+    /// Relative humidity, percent.
+    #[serde(default)]
+    pub humidity: f32,
+    #[serde(default)]
+    pub wind_kmh: f32,
+    /// Today's maximum UV index.
+    #[serde(default)]
+    pub uv: f32,
+    /// Daylight now at the location.
+    #[serde(default)]
+    pub is_day: bool,
+    /// Today's sunrise and sunset, local "HH:MM".
+    #[serde(default)]
+    pub sunrise: String,
+    #[serde(default)]
+    pub sunset: String,
+    /// Next 7 days from today: (date "YYYY-MM-DD", high °C, low °C, WMO code).
+    #[serde(default)]
+    pub daily: Vec<(String, f32, f32, i32)>,
+    /// Local time at the location when fetched, "YYYY-MM-DDTHH:MM".
+    #[serde(default)]
+    pub now: String,
 }
 
 /// Default location (Toronto).
@@ -93,7 +118,7 @@ fn get_json(host: &str, path: &str) -> Option<Value> {
 /// Fetches current weather, today's high/low and the next 6 hours for a location.
 pub fn fetch(lat: f32, lon: f32) -> Option<Weather> {
     let path = format!(
-        "/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=temperature_2m,weather_code&hourly=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=2"
+        "/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m,is_day&hourly=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset,uv_index_max&timezone=auto&forecast_days=7"
     );
     parse_forecast(&get_json("api.open-meteo.com", &path)?)
 }
@@ -119,12 +144,37 @@ fn parse_forecast(v: &Value) -> Option<Weather> {
             let temp = temps.get(i).and_then(|x| x.as_f64()).unwrap_or(f64::NAN) as f32;
             let c = codes.get(i).and_then(|x| x.as_i64()).unwrap_or(-1) as i32;
             hourly.push((hour, temp, c));
-            if hourly.len() == 6 {
+            if hourly.len() == 8 {
                 break;
             }
         }
     }
-    Some(Weather { temp_c, code, description: describe(code).to_string(), high_c, low_c, hourly })
+    let f = |k: &str| cur[k].as_f64().unwrap_or(0.0) as f32;
+    let hm = |k: &str| d[k][0].as_str().and_then(|t| t.get(11..16)).unwrap_or("").to_string();
+    let mut daily = Vec::new();
+    if let Some(dates) = d["time"].as_array() {
+        for (i, dt) in dates.iter().enumerate() {
+            let g = |k: &str| d[k][i].as_f64().unwrap_or(f64::NAN) as f32;
+            daily.push((dt.as_str().unwrap_or("").to_string(), g("temperature_2m_max"), g("temperature_2m_min"), d["weather_code"][i].as_i64().unwrap_or(-1) as i32));
+        }
+    }
+    Some(Weather {
+        temp_c,
+        code,
+        description: describe(code).to_string(),
+        high_c,
+        low_c,
+        hourly,
+        feels_c: cur["apparent_temperature"].as_f64().map(|v| v as f32).unwrap_or(temp_c),
+        humidity: f("relative_humidity_2m"),
+        wind_kmh: f("wind_speed_10m"),
+        uv: d["uv_index_max"][0].as_f64().unwrap_or(0.0) as f32,
+        is_day: cur["is_day"].as_i64().unwrap_or(1) == 1,
+        sunrise: hm("sunrise"),
+        sunset: hm("sunset"),
+        daily,
+        now: now.to_string(),
+    })
 }
 
 /// Resolves a place name to (lat, lon, "Name, Region, Country") via Open-Meteo geocoding.
@@ -197,7 +247,7 @@ mod tests {
         .unwrap();
         let w = parse_forecast(&v).unwrap();
         assert_eq!(w.description, "Partly cloudy");
-        assert_eq!(w.hourly.len(), 6);
+        assert_eq!(w.hourly.len(), 7); // the sample has 7 future hours (up to 8 are kept)
         assert_eq!(w.hourly[0], (15, 3.0, 1));
         assert_eq!(w.hourly[5].0, 20);
         assert_eq!((w.high_c, w.low_c), (8.1, -1.0));

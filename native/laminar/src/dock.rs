@@ -123,6 +123,21 @@ const CMD_UPDATE_TOMORROW: usize = 62;
 const CMD_UPDATE_WEEK: usize = 63;
 const CMD_UPDATE_SKIP: usize = 64;
 const CMD_UPDATE_CHECK: usize = 65;
+const CMD_WIDGET_REMOVE: usize = 70;
+const CMD_WIDGET_TO_LP: usize = 71;
+const CMD_WIDGET_CONNECT: usize = 72;
+const CMD_WIDGET_RESET: usize = 73;
+const CMD_LPW_REMOVE: usize = 74;
+const CMD_LPW_TO_DOCK: usize = 75;
+const CMD_LPW_CONNECT: usize = 76;
+const CMD_LPW_UP: usize = 77;
+const CMD_LPW_DOWN: usize = 78;
+const CMD_LPW_RESET: usize = 79;
+/// Timer length menu: base + minutes.
+const CMD_TIMER_MIN_BASE: usize = 3000;
+const TIMER_MINUTES: [usize; 7] = [1, 5, 10, 15, 25, 45, 60];
+/// Widget refresh (once a second).
+const T_WIDGETS: usize = 22;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -133,6 +148,19 @@ pub enum Kind {
     Trash,
     /// A new Laminar version is downloaded and ready to install.
     Update,
+    /// A widget pinned to the dock (key "::widget{pin index}:{widget id}").
+    Widget,
+}
+
+/// The widget a dock item shows.
+fn widget_of(key: &str) -> Option<&'static crate::widgets::Def> {
+    let rest = key.strip_prefix("::widget")?;
+    crate::widgets::catalog::get(rest.split_once(':')?.1)
+}
+
+/// Pin index of a widget item.
+fn widget_pin(key: &str) -> Option<usize> {
+    key.strip_prefix("::widget")?.split_once(':')?.0.parse().ok()
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -145,7 +173,7 @@ pub struct Item {
 
 impl Item {
     fn is_icon(&self) -> bool {
-        self.kind != Kind::Separator
+        !matches!(self.kind, Kind::Separator | Kind::Widget)
     }
 }
 
@@ -168,6 +196,8 @@ struct Geo {
     left: Vec<f32>,
     width: Vec<f32>,
     icon: Vec<bool>,
+    /// Widget items (fixed width, never magnified).
+    wid: Vec<bool>,
     hover_lr: (i32, i32),
 }
 
@@ -184,7 +214,13 @@ impl Geo {
         let win_h = ((m - b) + shelf_h + margin + label_room).ceil();
         let (mut left, mut width, mut x) = (Vec::new(), Vec::new(), 0.0);
         for it in items {
-            let w = if it.is_icon() { b + g } else { sep_w };
+            let w = if it.kind == Kind::Widget {
+                widget_of(&it.key).map(|d| crate::widgets::dock_width(d, b)).unwrap_or(b) + g
+            } else if it.is_icon() {
+                b + g
+            } else {
+                sep_w
+            };
             left.push(x);
             width.push(w);
             x += w;
@@ -197,6 +233,7 @@ impl Geo {
             range: cfg.magnify_range * (b + g),
             sep_w, win_w, win_h, x0, y0, shelf_w, shelf_h, left, width,
             icon: items.iter().map(|i| i.is_icon()).collect(),
+            wid: items.iter().map(|i| i.kind == Kind::Widget).collect(),
             hover_lr: (0, 0),
         };
         // The hover region must contain the dock at every pointer position.
@@ -245,6 +282,13 @@ impl Geo {
         (l + self.b * scales[i] / 2.0, scales[i])
     }
 
+    /// Left edge (window px) of a widget item when the pointer is at px.
+    fn item_left(&self, px: f32, amount: f32, i: usize) -> f32 {
+        let (dx, scales) = self.layout(px, amount);
+        let acc: f32 = (0..i).map(|j| (scales[j] - 1.0) * self.b).sum();
+        dx + self.p + self.left[i] + acc + self.g / 2.0
+    }
+
     /// Which icon is under (x, y)?
     fn hit(&self, x: f32, y: f32, amount: f32) -> Option<usize> {
         let (dx, scales) = self.layout(x, amount);
@@ -254,6 +298,9 @@ impl Geo {
             let l = dx + self.p + self.left[i] + acc;
             let slot = self.width[i] + (scales[i] - 1.0) * self.b;
             if self.icon[i] && x >= l && x < l + slot && y >= self.y0 + self.p + self.b - w - self.g {
+                return Some(i);
+            }
+            if self.wid[i] && x >= l + self.g / 2.0 && x < l + self.width[i] - self.g / 2.0 && y >= self.y0 + self.p - 6.0 && y < self.y0 + self.p + self.b + 6.0 {
                 return Some(i);
             }
             acc += (scales[i] - 1.0) * self.b;
@@ -432,6 +479,83 @@ struct Dock {
     sweep_moves: u32,
     last_scan_ms: f64,
     last_refresh_ms: f64,
+    /// Widgets: live state and feeds, and the dock's painted widgets by item index.
+    hub: crate::widgets::Hub,
+    wviews: HashMap<usize, WView>,
+    /// Pointer position (window px) at the last move or click.
+    ptr_xy: (f32, f32),
+    /// Pin index of the widget a dock menu is about.
+    menu_widget: Option<usize>,
+    /// Launchpad widget (list index) a menu is about.
+    menu_lpw: Option<usize>,
+    /// A Launchpad widget card pressed (index, x, y): a click, or a reorder drag if it moves.
+    lpw_press: Option<(usize, f32, f32)>,
+    /// Ticks of the widget timer (seconds).
+    wtick: u64,
+    /// The Start button's four panes, and whether they're spread (hovered).
+    start_panes: Vec<StartPane>,
+    start_open: bool,
+}
+
+/// One pane of the Start mark: its visual, resting offset and the way it moves on hover.
+struct StartPane {
+    vis: ShapeVisual,
+    rest: (f32, f32),
+    dir: (f32, f32),
+    spread: f32,
+}
+
+/// The Start button: four rounded panes on a quiet frosted tile, all vector shapes
+/// (crisp at any magnification). Monochrome, following the theme.
+fn start_tile(c: &Compositor, b: f32) -> Result<(ContainerVisual, Vec<StartPane>)> {
+    let light = crate::ui::theme::light();
+    let tile = c.CreateContainerVisual()?;
+    tile.SetRelativeSizeAdjustment(v2(1.0, 1.0))?;
+    // Tile: a soft top-to-bottom sheen of the theme's ink, a hairline rim.
+    let bgv = c.CreateShapeVisual()?;
+    bgv.SetSize(v2(b, b))?;
+    let geo = c.CreateRoundedRectangleGeometry()?;
+    geo.SetSize(v2(b, b))?;
+    geo.SetCornerRadius(v2(b * 0.24, b * 0.24))?;
+    let shape = c.CreateSpriteShapeWithGeometry(&geo)?;
+    let grad = c.CreateLinearGradientBrush()?;
+    grad.SetStartPoint(v2(0.0, 0.0))?;
+    grad.SetEndPoint(v2(0.0, b))?;
+    grad.SetMappingMode(CompositionMappingMode::Absolute)?;
+    let ink = |a: f32| if light { Color { A: (a * 0.55 * 255.0) as u8, R: 20, G: 20, B: 30 } } else { Color { A: (a * 255.0) as u8, R: 255, G: 255, B: 255 } };
+    grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(0.0, ink(0.20))?)?;
+    grad.ColorStops()?.Append(&c.CreateColorGradientStopWithOffsetAndColor(1.0, ink(0.11))?)?;
+    shape.SetFillBrush(&grad)?;
+    shape.SetStrokeBrush(&c.CreateColorBrushWithColor(ink(0.22))?)?;
+    shape.SetStrokeThickness(1.0)?;
+    bgv.Shapes()?.Append(&shape)?;
+    tile.Children()?.InsertAtTop(&bgv)?;
+    // Panes: 2 x 2, centred, with a narrow gap like the Windows mark.
+    let pane = (b * 0.205).round();
+    let gap = (b * 0.045).max(2.0).round();
+    let x0 = ((b - 2.0 * pane - gap) / 2.0).round();
+    let fill = if light { Color { A: 225, R: 28, G: 28, B: 34 } } else { Color { A: 242, R: 248, G: 248, B: 250 } };
+    let mut panes = Vec::new();
+    for (k, (cx, cy)) in [(0.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+        let (v, _, _) = crate::ui::rounded(c, pane, pane, pane * 0.2, fill)?;
+        let rest = (x0 + cx * (pane + gap), x0 + cy * (pane + gap));
+        v.SetOffset(v3(rest.0, rest.1, 0.0))?;
+        v.SetCenterPoint(v3(pane / 2.0, pane / 2.0, 0.0))?;
+        tile.Children()?.InsertAtTop(&v)?;
+        let _ = k;
+        panes.push(StartPane { vis: v, rest, dir: (cx * 2.0 - 1.0, cy * 2.0 - 1.0), spread: (b * 0.03).max(1.5) });
+    }
+    Ok((tile, panes))
+}
+
+/// A widget drawn in the dock.
+struct WView {
+    def: &'static crate::widgets::Def,
+    surface: CompositionDrawingSurface,
+    tile: ContainerVisual,
+    painted: crate::widgets::Painted,
+    w: f32,
+    h: f32,
 }
 
 thread_local! {
@@ -472,6 +596,12 @@ macro_rules! trace {
 pub(crate) fn tracing() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("LAMINAR_TRACE").is_ok())
+}
+/// Widget connector messages go to the trace log only (they can mention service names, never keys).
+pub(crate) fn trace_widget(msg: &str) {
+    if tracing() {
+        eprintln!("[{:>7.1} ms] widgets: {msg}", trace_clock());
+    }
 }
 pub(crate) fn trace_clock() -> f64 {
     static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -592,6 +722,7 @@ impl Dock {
                 Pin::Id(id) if id == SEPARATOR => v.push(Item { kind: Kind::Separator, key: format!("::sep{n}"), pinned: true }),
                 Pin::Id(id) => v.push(Item { kind: Kind::App, key: id.clone(), pinned: true }),
                 Pin::Stack { .. } => v.push(Item { kind: Kind::Stack, key: format!("::stack{n}"), pinned: true }),
+                Pin::Widget { widget } => v.push(Item { kind: Kind::Widget, key: format!("::widget{n}:{widget}"), pinned: true }),
             }
         }
         // Running apps that aren't pinned, in the order they first appeared.
@@ -646,12 +777,13 @@ impl Dock {
             }
             return true;
         }
-        if it.kind == Kind::Separator || self.brushes.contains_key(&it.key) {
+        if matches!(it.kind, Kind::Separator | Kind::Widget) || self.brushes.contains_key(&it.key) {
             return true;
         }
         let px = (self.cfg.magnified_size.max(self.cfg.icon_size) * self.scale).ceil();
         let surface = match it.kind {
-            Kind::Launch => self.gfx.logo_surface(px).ok(),
+            // The Start button is drawn with vector shapes in `rebuild` (see `start_tile`).
+            Kind::Launch => return true,
             Kind::Update => {
                 self.names.insert(it.key.clone(), "Update Laminar".into());
                 self.gfx.update_surface(px).ok()
@@ -730,6 +862,7 @@ impl Dock {
         self.inds.clear();
         self.ind_state.clear();
         self.atts.clear();
+        self.wviews.clear();
         self.hover = None;
         let _ = self.show_label(None);
 
@@ -739,10 +872,27 @@ impl Dock {
         }
 
         let geo = &self.geo;
+        let mut widget_tiles: Vec<(usize, &'static crate::widgets::Def, ContainerVisual, f32)> = Vec::new();
+        let mut start_panes: Vec<StartPane> = Vec::new();
         // Slots (one container per item), created first so expressions can reference them.
-        for it in &self.items {
+        for (idx, it) in self.items.iter().enumerate() {
             let slot = c.CreateContainerVisual()?;
-            if it.kind == Kind::Stack {
+            if it.kind == Kind::Launch {
+                slot.SetSize(v2(geo.b, geo.b))?;
+                slot.SetCenterPoint(v3(0.0, geo.b, 0.0))?;
+                let (tile, panes) = start_tile(&c, geo.b)?;
+                slot.Children()?.InsertAtTop(&tile)?;
+                self.tiles.push(Some(tile.cast()?));
+                start_panes = panes;
+            } else if let (Kind::Widget, Some(def)) = (it.kind, widget_of(&it.key)) {
+                let ww = crate::widgets::dock_width(def, geo.b);
+                slot.SetSize(v2(ww, geo.b))?;
+                let tile = c.CreateContainerVisual()?;
+                tile.SetSize(v2(ww, geo.b))?;
+                slot.Children()?.InsertAtTop(&tile)?;
+                self.tiles.push(Some(tile.cast()?));
+                widget_tiles.push((idx, def, tile, ww));
+            } else if it.kind == Kind::Stack {
                 slot.SetSize(v2(geo.b, geo.b))?;
                 slot.SetCenterPoint(v3(0.0, geo.b, 0.0))?;
                 // A frosted tile with up to four mini icons.
@@ -790,7 +940,7 @@ impl Dock {
         // Expressions are chained (each refers only to its left neighbour) so they stay short
         // however many icons there are: Windows rejects expression strings that are too long.
         let n = self.slots.len();
-        let base_x = |i: usize| geo.p + geo.left[i] + if geo.icon[i] { geo.g / 2.0 } else { 0.0 };
+        let base_x = |i: usize| geo.p + geo.left[i] + if geo.icon[i] || geo.wid[i] { geo.g / 2.0 } else { 0.0 };
         let grow_of = |name: &str, i: usize| {
             if geo.icon[i] { format!("(({name}.Scale.X - 1) * {b})", b = geo.b) } else { "0".to_string() }
         };
@@ -949,6 +1099,20 @@ impl Dock {
             self.atts.push(Some(att));
         }
 
+        self.start_panes = start_panes;
+        self.start_open = false;
+        for (idx, def, tile, ww) in widget_tiles {
+            let h = self.geo.b;
+            match self.gfx.surface(ww, h) {
+                Ok(surface) => {
+                    let sp = crate::ui::surface_sprite(&c, &surface, ww, h)?;
+                    tile.Children()?.InsertAtTop(&sp)?;
+                    self.wviews.insert(idx, WView { def, surface, tile, painted: Default::default(), w: ww, h });
+                }
+                Err(e) => trace!("widget surface failed: {e:?}"),
+            }
+        }
+        self.paint_dock_widgets(true);
         self.apply_region();
         if tracing() {
             let top = self.monitor.bottom - self.geo.win_h as i32;
@@ -957,6 +1121,39 @@ impl Dock {
             }
         }
         Ok(())
+    }
+
+    /// Hovering the Start button: its panes ease apart a little, one after another, and
+    /// settle back when the pointer leaves. Nothing moves if Windows' animations are off.
+    fn start_hover(&mut self, on: bool) {
+        if on == self.start_open || self.start_panes.is_empty() {
+            return;
+        }
+        self.start_open = on;
+        if !animations_enabled() {
+            return;
+        }
+        let c = &self.compositor;
+        let Ok(springy) = c.CreateCubicBezierEasingFunction(v2(0.34, 1.45), v2(0.64, 1.0)) else { return };
+        let Ok(settle) = c.CreateCubicBezierEasingFunction(v2(0.2, 0.8), v2(0.2, 1.0)) else { return };
+        for (k, p) in self.start_panes.iter().enumerate() {
+            let (tx, ty, sc) = if on { (p.rest.0 + p.dir.0 * p.spread, p.rest.1 + p.dir.1 * p.spread, 0.94) } else { (p.rest.0, p.rest.1, 1.0) };
+            if let (Ok(a), Ok(s)) = (c.CreateVector3KeyFrameAnimation(), c.CreateVector3KeyFrameAnimation()) {
+                let e = if on { &springy } else { &settle };
+                let _ = a.InsertKeyFrameWithEasingFunction(1.0, v3(tx, ty, 0.0), e);
+                let _ = s.InsertKeyFrameWithEasingFunction(1.0, v3(sc, sc, 1.0), e);
+                let dur = ms(((if on { 420.0 } else { 260.0 }) * slowmo()) as i64);
+                let _ = a.SetDuration(dur);
+                let _ = s.SetDuration(dur);
+                if on {
+                    // Reading order: top-left, top-right, bottom-left, bottom-right.
+                    let _ = a.SetDelayTime(ms((k as f32 * 45.0 * slowmo()) as i64));
+                    let _ = s.SetDelayTime(ms((k as f32 * 45.0 * slowmo()) as i64));
+                }
+                let _ = p.vis.StartAnimation(&hs("Offset"), &a);
+                let _ = p.vis.StartAnimation(&hs("Scale"), &s);
+            }
+        }
     }
 
     /// Size of the attention dot's parts: (dot, gap to the running dot, glow box).
@@ -1285,8 +1482,11 @@ impl Dock {
             let _ = self.animate_amount(1.0, 160);
         }
         let _ = self.ptr.InsertScalar(&hs("PointerX"), x);
+        self.ptr_xy = (x, y);
         let hit = self.geo.hit(x, y, 1.0);
         if hit != self.hover {
+            let launch = |h: Option<usize>| h.map(|i| self.items.get(i).map(|it| it.kind == Kind::Launch).unwrap_or(false)).unwrap_or(false);
+            self.start_hover(launch(hit));
             self.hover = hit;
             self.preview_hover(hit);
             let _ = self.show_label(if self.preview.open { None } else { hit });
@@ -1301,6 +1501,7 @@ impl Dock {
         self.hovering = false;
         self.hover = None;
         self.pressed = None;
+        self.start_hover(false);
         let _ = self.show_label(None);
         let _ = self.animate_amount(0.0, 260);
         unsafe {
@@ -1358,6 +1559,7 @@ impl Dock {
     }
 
     fn show_label(&mut self, idx: Option<usize>) -> Result<()> {
+        let idx = idx.filter(|&i| self.items.get(i).map(|it| it.kind != Kind::Widget).unwrap_or(false));
         let c = &self.compositor;
         let fade = c.CreateScalarKeyFrameAnimation()?;
         fade.SetDuration(ms(120))?;
@@ -1420,6 +1622,7 @@ impl Dock {
             Kind::Trash => apps::launch(apps::RECYCLE_BIN),
             Kind::Update => self.update_menu(),
             Kind::Separator => {}
+            Kind::Widget => self.widget_click(i),
             Kind::Stack => {
                 if self.stack_view.open {
                     self.stack_view.hide();
@@ -1494,6 +1697,25 @@ impl Dock {
             m.push(MenuItem::item("Remove from Dock", CMD_STACK_REMOVE).danger());
             m.push(MenuItem::sep());
             self.menu_stack = Some(n);
+        } else if let Some((it, def)) = item.as_ref().filter(|it| it.kind == Kind::Widget).and_then(|it| widget_of(&it.key).map(|d| (it.clone(), d))) {
+            m.push(MenuItem::header(def.name.to_string()));
+            self.menu_widget = widget_pin(&it.key);
+            if crate::widgets::conns(def).iter().any(|c| laminar_sys::connectors::info(c).map(|i| !i.fields.is_empty()).unwrap_or(false)) {
+                m.push(MenuItem::item("Connect…", CMD_WIDGET_CONNECT));
+            }
+            if matches!(def.face, crate::widgets::catalog::Face::Timer(_)) {
+                m.push(MenuItem::item("Reset", CMD_WIDGET_RESET));
+            }
+            if matches!(def.face, crate::widgets::catalog::Face::Timer(crate::widgets::TimerKind::Countdown)) {
+                let cur = self.hub.timers.get(&crate::widgets::TimerKind::Countdown).map(|t| t.total as usize / 60).unwrap_or(0);
+                for mins in TIMER_MINUTES {
+                    m.push(MenuItem::item(format!("{mins} min"), CMD_TIMER_MIN_BASE + mins).checked(mins == cur));
+                }
+            }
+            let in_lp = self.cfg.launchpad_widgets.iter().any(|w| w == def.id);
+            m.push(MenuItem::item("Show in Launchpad", CMD_WIDGET_TO_LP).checked(in_lp));
+            m.push(MenuItem::item("Remove from Dock", CMD_WIDGET_REMOVE).danger());
+            m.push(MenuItem::sep());
         } else if item.as_ref().map(|it| it.kind == Kind::Trash).unwrap_or(false) {
             m.push(MenuItem::item("Open Recycle Bin", CMD_TRASH_OPEN));
             m.push(MenuItem::sep());
@@ -1573,6 +1795,23 @@ impl Dock {
             "menu" => {
                 self.on_move(x, y);
                 self.context_menu(x, y, Some(anchor));
+            }
+            "start-hover" => {
+                let (sx, sy) = (g.center_abs(0), g.y0 + g.shelf_h / 2.0);
+                self.on_move(sx, sy);
+            }
+            "lp-gallery" | "lp-form" => {
+                self.open_launchpad();
+                if name == "lp-form" {
+                    let conn = std::env::var("LAMINAR_DEMO_CONN").unwrap_or_else(|_| "stripe".into());
+                    if let Some(info) = laminar_sys::connectors::info(&conn) {
+                        self.open_connect(info.id);
+                    }
+                } else {
+                    let k = std::env::var("LAMINAR_DEMO_CAT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    self.lp_act(Act::AddWidgets);
+                    self.lp_act(Act::GalleryCat(k));
+                }
             }
             "launchpad" | "lp-all" | "lp-search" | "lp-settings" | "lp-about" | "lp-wifi" | "lp-wifi-sample" => {
                 self.open_launchpad();
@@ -1761,6 +2000,9 @@ impl Dock {
     }
 
     fn on_menu_command(&mut self, cmd: usize) {
+        if self.widget_menu_command(cmd) {
+            return;
+        }
         let (item, wins) = self.menu_ctx.take().unwrap_or((None, Vec::new()));
         match cmd {
             CMD_NEW => {
@@ -1978,7 +2220,19 @@ impl Dock {
             let (x, y) = lparam_xy(lp);
             match msg {
                 WM_MOUSEMOVE => {
-                    if let Some(a) = self.lp_drag.clone() {
+                    if self.launchpad.reordering() {
+                        self.launchpad.reorder_move(&self.compositor, y);
+                    } else if let Some((i, px, py)) = self.lpw_press {
+                        if ((x - px).powi(2) + (y - py).powi(2)).sqrt() > 6.0 * self.scale {
+                            // Dragging a widget card: reorder the column.
+                            self.lpw_press = None;
+                            self.launchpad.begin_reorder(&self.compositor, i, py);
+                            self.launchpad.reorder_move(&self.compositor, y);
+                            unsafe {
+                                SetCapture(hwnd);
+                            }
+                        }
+                    } else if let Some(a) = self.lp_drag.clone() {
                         self.lp_slider(&a, x, false);
                     } else if let Some((id, px, py)) = self.lp_press.clone() {
                         if ((x - px).powi(2) + (y - py).powi(2)).sqrt() > 8.0 * self.scale {
@@ -1995,6 +2249,9 @@ impl Dock {
                     if let Some(Act::App(id)) = self.launchpad.act_at(x, y) {
                         self.lp_press = Some((id, x, y));
                     }
+                    if let Some(Act::Card(i) | Act::Widget(i, _, _)) = self.launchpad.act_at(x, y) {
+                        self.lpw_press = Some((i, x, y));
+                    }
                     if let Some(a) = self.launchpad.act_at(x, y) {
                         if matches!(a, Act::Volume | Act::Slider(_)) {
                             self.lp_drag = Some(a.clone());
@@ -2007,7 +2264,25 @@ impl Dock {
                 }
                 WM_LBUTTONUP => {
                     self.lp_press = None;
-                    if let Some(a) = self.lp_drag.take() {
+                    self.lpw_press = None;
+                    if self.launchpad.reordering() {
+                        unsafe {
+                            let _ = ReleaseCapture();
+                        }
+                        match self.launchpad.end_reorder() {
+                            Some((from, to)) => {
+                                trace!("launchpad widget moved {from} -> {to}");
+                                self.save_and_apply(|c| {
+                                    if from < c.launchpad_widgets.len() {
+                                        let w = c.launchpad_widgets.remove(from);
+                                        c.launchpad_widgets.insert(to.min(c.launchpad_widgets.len()), w);
+                                    }
+                                });
+                            }
+                            None => {}
+                        }
+                        self.lp_render("left");
+                    } else if let Some(a) = self.lp_drag.take() {
                         unsafe {
                             let _ = ReleaseCapture();
                         }
@@ -2017,7 +2292,9 @@ impl Dock {
                     }
                 }
                 WM_RBUTTONUP => {
-                    if let Some(Act::Tray(key)) = self.launchpad.act_at(x, y) {
+                    if let Some(Act::Card(i) | Act::Widget(i, _, _)) = self.launchpad.act_at(x, y) {
+                        self.lp_widget_menu(i);
+                    } else if let Some(Act::Tray(key)) = self.launchpad.act_at(x, y) {
                         self.tray_click(key, crate::tray::Click::Right);
                     } else if let Some(Act::App(id)) = self.launchpad.act_at(x, y) {
                         let in_dock = self.cfg.pins.iter().any(|p| p.app() == Some(id.as_str()));
@@ -2047,7 +2324,41 @@ impl Dock {
                 }
                 WM_MOUSEWHEEL => {
                     let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32 / 120.0;
-                    self.launchpad.on_wheel(delta * 72.0 * self.scale);
+                    // Wheel messages carry screen coordinates.
+                    let (sx, sy) = ((lp.0 & 0xFFFF) as i16 as f32, ((lp.0 >> 16) & 0xFFFF) as i16 as f32);
+                    let (wx, wy) = (sx - self.monitor.left as f32, sy - self.monitor.top as f32);
+                    if self.launchpad.over_left(wx, wy) {
+                        self.launchpad.on_wheel_left(delta * 72.0 * self.scale);
+                    } else {
+                        self.launchpad.on_wheel(delta * 72.0 * self.scale);
+                    }
+                }
+                WM_CHAR if self.launchpad.form.is_some() => {
+                    let ch = char::from_u32(wp.0 as u32).unwrap_or('\0');
+                    let changed = if ch == '\u{16}' {
+                        // Ctrl+V
+                        clipboard_text().map(|t| self.launchpad.form_paste(&t)).unwrap_or(false)
+                    } else {
+                        self.launchpad.form_char(ch)
+                    };
+                    if changed {
+                        self.lp_render("center");
+                    }
+                }
+                WM_KEYDOWN if self.launchpad.form.is_some() => {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_TAB};
+                    let vk = wp.0 as u16;
+                    if vk == VK_ESCAPE.0 {
+                        self.launchpad.form = None;
+                        self.lp_render("center");
+                    } else if vk == VK_RETURN.0 {
+                        self.save_form();
+                    } else if vk == VK_TAB.0 {
+                        self.launchpad.form_next(unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0);
+                        self.lp_render("center");
+                    } else if vk == VK_BACK.0 && self.launchpad.form_backspace() {
+                        self.lp_render("center");
+                    }
                 }
                 WM_CHAR => {
                     let ch = char::from_u32(wp.0 as u32).unwrap_or('\0');
@@ -2059,7 +2370,10 @@ impl Dock {
                     let vk = wp.0 as u16;
                     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
                     if vk == VK_ESCAPE.0 {
-                        if self.launchpad.settings.is_some() {
+                        if self.launchpad.gallery.is_some() {
+                            self.launchpad.gallery = None;
+                            self.lp_render("all");
+                        } else if self.launchpad.settings.is_some() {
                             self.launchpad.settings = None;
                             self.lp_render("all");
                         } else if !self.launchpad.query.is_empty() {
@@ -2340,6 +2654,7 @@ impl Dock {
             self.names.entry(a.id.clone()).or_insert_with(|| a.name.clone());
         }
         let tray = self.tray_views();
+        let wa = self.whatsapp_state();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
         let data = lp::Data {
@@ -2358,12 +2673,17 @@ impl Dock {
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
+            hub: &self.hub,
+            whatsapp: wa,
         };
         self.launchpad.update_results(&data);
         let (c, gfx) = (self.compositor.clone(), &self.gfx);
         let r = match which {
             "all" => self.launchpad.render(&c, gfx, &data),
             "right" => self.launchpad.render_right_panel(&c, gfx, &data),
+            "left" => self.launchpad.render_left_panel(&c, gfx, &data),
+            "live" => self.launchpad.repaint_live(gfx, &data),
+            "center" => self.launchpad.render_center_panel(&c, gfx, &data),
             _ => Ok(()),
         };
         if let Err(e) = r {
@@ -2467,6 +2787,7 @@ impl Dock {
         }
         let reserve = self.geo.shelf_h + 2.0 * self.geo.margin;
         let tray = self.tray_views();
+        let wa = self.whatsapp_state();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
         let data = lp::Data {
@@ -2485,6 +2806,8 @@ impl Dock {
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
+            hub: &self.hub,
+            whatsapp: wa,
         };
         let (c, gfx, bd) = (self.compositor.clone(), &self.gfx, self.backdrop.clone());
         if let Err(e) = self.launchpad.show(&c, gfx, &bd, self.monitor, reserve, self.scale, &data) {
@@ -2688,7 +3011,38 @@ impl Dock {
                 self.close_launchpad();
                 self.services.send(Req::Power(services::Power::Lock));
             }
-            Act::Volume | Act::Slider(_) | Act::Search => {}
+            Act::Volume | Act::Slider(_) | Act::Search | Act::Card(_) => {}
+            Act::Widget(_, a, frac) => self.widget_act(a, frac),
+            Act::AddWidgets => {
+                self.launchpad.query.clear();
+                self.launchpad.settings = None;
+                self.launchpad.form = None;
+                self.launchpad.gallery = Some(0);
+                self.lp_render("all");
+            }
+            Act::GalleryCat(k) => {
+                self.launchpad.gallery = Some(k);
+                self.lp_render("center");
+            }
+            Act::CloseGallery => {
+                self.launchpad.gallery = None;
+                self.lp_render("all");
+            }
+            Act::AddWidget(id, dock) => self.add_widget(id, dock),
+            Act::RemoveWidget(id) => self.remove_lp_widget(id),
+            Act::Connect(conn) => self.open_connect(conn),
+            Act::FormFocus(k) => {
+                if let Some(f) = self.launchpad.form.as_mut() {
+                    f.focus = k;
+                }
+                self.lp_render("center");
+            }
+            Act::FormSave => self.save_form(),
+            Act::FormCancel => {
+                self.launchpad.form = None;
+                self.lp_render("center");
+            }
+            Act::FormDisconnect => self.disconnect_form(),
         }
     }
 
@@ -2727,12 +3081,15 @@ impl Dock {
                     render = true;
                 }
                 Reply::Stats(st) => {
+                    self.hub.push_stats(&st);
                     self.stats = Some(st);
+                    self.paint_dock_widgets(false);
                     render = true;
                 }
                 Reply::Weather(w) => {
                     if w.is_some() {
                         self.weather = w;
+                        self.paint_dock_widgets(true);
                     }
                     render = true;
                 }
@@ -3033,6 +3390,7 @@ impl Dock {
             let already = self.cfg.pins.iter().any(|p| match p {
                 Pin::Id(a) => a.eq_ignore_ascii_case(f),
                 Pin::Stack { apps, .. } => apps.iter().any(|a| a.eq_ignore_ascii_case(f)),
+                Pin::Widget { .. } => false,
             });
             if already {
                 continue;
@@ -3131,7 +3489,7 @@ impl Dock {
     /// Items 1..boundary are the pinned ones (after the launch button).
     fn pinned_boundary(&self) -> usize {
         let mut b = 1;
-        while b < self.items.len() && self.items[b].pinned && matches!(self.items[b].kind, Kind::App | Kind::Separator | Kind::Stack) {
+        while b < self.items.len() && self.items[b].pinned && matches!(self.items[b].kind, Kind::App | Kind::Separator | Kind::Stack | Kind::Widget) {
             b += 1;
         }
         b
@@ -3139,7 +3497,7 @@ impl Dock {
 
     fn draggable(&self, i: usize) -> bool {
         let it = &self.items[i];
-        it.kind == Kind::App || it.kind == Kind::Stack || (it.kind == Kind::Separator && it.pinned)
+        it.kind == Kind::App || it.kind == Kind::Stack || it.kind == Kind::Widget || (it.kind == Kind::Separator && it.pinned)
     }
 
     fn set_slot_value(&self, slot: usize, prop: &str, v: f32) {
@@ -3225,7 +3583,14 @@ impl Dock {
         g.body.SetOpacity(1.0)?;
         g.body.SetScale(crate::ui::v3(1.0, 1.0, 1.0))?;
         g.body.SetCenterPoint(crate::ui::v3(size / 2.0, size / 2.0, 0.0))?;
-        if it.kind == Kind::Separator {
+        if let Some(v) = self.wviews.get(&i).filter(|_| it.kind == Kind::Widget) {
+            // Widgets: a copy of the widget (shrunk to fit the ghost window if it's wide).
+            let k = (size / (v.w + 8.0 * s)).min(1.0);
+            let sp = crate::ui::surface_sprite(&c, &v.surface, v.w, v.h)?;
+            sp.SetScale(crate::ui::v3(k, k, 1.0))?;
+            sp.SetOffset(crate::ui::v3((size - v.w * k) / 2.0, (size - v.h * k) / 2.0, 0.0))?;
+            g.body.Children()?.InsertAtTop(&sp)?;
+        } else if it.kind == Kind::Separator {
             let (line, _, _) = crate::ui::rounded(&c, (3.0 * s).round(), icon * 0.7, 1.5 * s, crate::ui::theme::ink(0.8))?;
             line.SetOffset(crate::ui::v3((size - 3.0 * s) / 2.0, (size - icon * 0.7) / 2.0, 0.0))?;
             g.body.Children()?.InsertAtTop(&line)?;
@@ -3375,6 +3740,7 @@ impl Dock {
         match it.kind {
             Kind::Separator => Pin::sep(),
             Kind::Stack => self.stack_of(&it.key).map(|(n, _, _)| self.cfg.pins[n].clone()).unwrap_or_else(Pin::sep),
+            Kind::Widget => widget_pin(&it.key).and_then(|n| self.cfg.pins.get(n).cloned()).unwrap_or_else(Pin::sep),
             _ => Pin::Id(it.key.clone()),
         }
     }
@@ -3424,6 +3790,7 @@ impl Dock {
                             Pin::Stack { stack, apps }
                         }
                         Pin::Id(a) => Pin::Stack { stack: "New Stack".into(), apps: vec![a, it.key.clone()] },
+                        w @ Pin::Widget { .. } => w,
                     });
                 } else {
                     order.push(p);
@@ -3496,6 +3863,7 @@ impl Dock {
                             Pin::Stack { stack, apps }
                         }
                         Pin::Id(a) => Pin::Stack { stack: "New Stack".into(), apps: vec![a, id.to_string()] },
+                        w @ Pin::Widget { .. } => w,
                     }
                 })
                 .collect();
@@ -3669,6 +4037,7 @@ impl Dock {
     }
 
     fn shutdown(&mut self) {
+        self.hub.shutdown();
         self.helpers.stop();
         crate::tray::stop();
         if self.integrate {
@@ -3796,6 +4165,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 } else {
                     let hit = d.geo.hit(x, y, 1.0);
                     if hit.is_some() && hit == d.pressed {
+                        d.ptr_xy = (x, y);
                         d.on_click(hit.unwrap());
                     }
                 }
@@ -3838,6 +4208,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         WM_APP_SVC => {
             with_dock(|d| d.on_service_replies());
+            return LRESULT(0);
+        }
+        crate::widgets::hub::WM_APP_WIDGETS => {
+            with_dock(|d| d.on_widget_replies());
             return LRESULT(0);
         }
         WM_APP_WINKEY => {
@@ -3908,6 +4282,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 T_WEATHER => {
                     d.services.send(Req::Weather(d.cfg.weather_lat, d.cfg.weather_lon));
                 }
+                T_WIDGETS => d.widget_tick(),
                 T_PREVIEW => unsafe {
                     let _ = KillTimer(Some(hwnd), T_PREVIEW);
                     if let Some(i) = d.preview_pending.take() {
@@ -4077,6 +4452,33 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         return LRESULT(0);
     }
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+/// Text on the clipboard, if any.
+fn clipboard_text() -> Option<String> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let out = (|| {
+            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let g = windows::Win32::Foundation::HGLOBAL(h.0);
+            let p = GlobalLock(g) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let mut n = 0;
+            while *p.add(n) != 0 && n < 64 * 1024 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(g);
+            Some(s)
+        })();
+        let _ = CloseClipboard();
+        out
+    }
 }
 
 fn user_name() -> String {
@@ -4287,6 +4689,15 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             sweep_moves: 0,
             last_scan_ms: 0.0,
             last_refresh_ms: 0.0,
+            hub: crate::widgets::Hub::new(hwnd),
+            wviews: HashMap::new(),
+            ptr_xy: (0.0, 0.0),
+            menu_widget: None,
+            menu_lpw: None,
+            lpw_press: None,
+            wtick: 0,
+            start_panes: Vec::new(),
+            start_open: false,
         };
         dock.update_theme();
         dock.update_glass();
@@ -4317,6 +4728,10 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
         dock.services.send(Req::Weather(dock.cfg.weather_lat, dock.cfg.weather_lon));
         dock.services.send(Req::Control);
         SetTimer(Some(hwnd), T_WEATHER, 30 * 60 * 1000, None);
+        SetTimer(Some(hwnd), T_WIDGETS, 1000, None);
+        dock.hub.ask_mic();
+        dock.hub.ask_output();
+        dock.hub.ask_brightness();
         let main_dock = integrate && opts.monitor.is_none();
         let _kb = if main_dock { crate::winkey::install(hwnd, dock.cfg.win_key_launchpad) } else { None };
         if main_dock {
@@ -4388,3 +4803,7 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
     }
     Ok(())
 }
+
+// Widgets (after the trace! macro, which the module uses).
+#[path = "dock_widgets.rs"]
+mod dock_widgets;

@@ -140,60 +140,6 @@ impl Gfx {
         unsafe { rt.CreateGradientStopCollection(&s, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) }
     }
 
-    /// The Laminar mark: a gradient squircle with three flowing lines.
-    pub fn logo_surface(&self, px: f32) -> Result<CompositionDrawingSurface> {
-        let surface = self.surface(px, px)?;
-        let tile = self.squircle(0.0, 0.0, px)?;
-        self.draw(&surface, |dc| unsafe {
-            let grad = self.stops(dc, &[
-                (0.0, color(0.50, 0.66, 1.0, 1.0)),
-                (0.5, color(0.42, 0.30, 0.96, 1.0)),
-                (1.0, color(0.88, 0.35, 0.81, 1.0)),
-            ])?;
-            let fill = dc.CreateLinearGradientBrush(
-                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(0.0, 0.0), endPoint: pt(px, px) },
-                None,
-                &grad,
-            )?;
-            dc.FillGeometry(&tile, &fill, None);
-            // gloss
-            let gloss = self.stops(dc, &[(0.0, color(1.0, 1.0, 1.0, 0.28)), (0.5, color(1.0, 1.0, 1.0, 0.0))])?;
-            let gb = dc.CreateLinearGradientBrush(
-                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(0.0, 0.0), endPoint: pt(0.0, px) },
-                None,
-                &gloss,
-            )?;
-            dc.FillGeometry(&tile, &gb, None);
-            // three flow lines (same curves as the prototype, in a 100-unit box)
-            let k = px / 100.0;
-            let base: &ID2D1Factory = &self.factory;
-            let cap = base.CreateStrokeStyle(
-                &D2D1_STROKE_STYLE_PROPERTIES {
-                    startCap: D2D1_CAP_STYLE_ROUND,
-                    endCap: D2D1_CAP_STYLE_ROUND,
-                    lineJoin: D2D1_LINE_JOIN_ROUND,
-                    ..Default::default()
-                },
-                None,
-            )?;
-            for (y, a) in [(40.0, 0.98), (54.0, 0.78), (68.0, 0.55)] {
-                let g = self.factory.CreatePathGeometry()?;
-                let s = g.Open()?;
-                s.BeginFigure(pt(20.0 * k, y * k), D2D1_FIGURE_BEGIN_HOLLOW);
-                s.AddBezier(&D2D1_BEZIER_SEGMENT { point1: pt(32.0 * k, (y - 10.0) * k), point2: pt(42.0 * k, (y + 8.0) * k), point3: pt(54.0 * k, (y - 2.0) * k) });
-                s.AddBezier(&D2D1_BEZIER_SEGMENT { point1: pt(66.0 * k, (y - 12.0) * k), point2: pt(74.0 * k, (y - 10.0) * k), point3: pt(80.0 * k, (y - 6.0) * k) });
-                s.EndFigure(D2D1_FIGURE_END_OPEN);
-                s.Close()?;
-                let w = dc.CreateSolidColorBrush(&color(1.0, 1.0, 1.0, a), None)?;
-                dc.DrawGeometry(&g, &w, 5.2 * k, &cap);
-            }
-            let rim = dc.CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.24), None)?;
-            dc.DrawGeometry(&tile, &rim, 1.2 * k, None);
-            Ok(())
-        })?;
-        Ok(surface)
-    }
-
     /// The dock's "update ready" icon: a green-to-blue tile with a white download arrow.
     pub fn update_surface(&self, px: f32) -> Result<CompositionDrawingSurface> {
         let surface = self.surface(px, px)?;
