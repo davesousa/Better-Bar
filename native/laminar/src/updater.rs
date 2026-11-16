@@ -179,6 +179,25 @@ pub fn set_start_at_login(on: bool) {
     }
 }
 
+/// At launch: put the sign-in setting and the Startup shortcut in step **without ever
+/// creating the shortcut**. Only the Settings switch creates it. An unsigned program that
+/// adds itself to Startup on its own first run looks like a dropper to antivirus
+/// heuristics (Avira flagged exactly that as Drop.Win64.Startup after a reinstall).
+/// Returns whether Laminar really starts at sign-in, so the switch can show the truth
+/// (after a reinstall the setting may say on while the shortcut is gone).
+pub fn sync_start_at_login(wanted: bool) -> bool {
+    if !installed() {
+        return wanted;
+    }
+    remove_legacy_run_value();
+    let Some(lnk) = startup_shortcut_path() else { return false };
+    if !wanted {
+        let _ = std::fs::remove_file(&lnk);
+        return false;
+    }
+    lnk.exists()
+}
+
 /// Versions up to 0.2.1 started at sign-in through a `Run` registry value. Remove it.
 fn remove_legacy_run_value() {
     unsafe {

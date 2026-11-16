@@ -170,7 +170,7 @@ fn section_rows(i: usize) -> Vec<Row> {
             r("show_windows_settings", "Windows Settings widget", "Always in Launchpad unless turned off here.", Toggle),
         ],
         3 => vec![
-            r("start_at_login", "Start Laminar when you sign in", "Installed copies only.", Toggle),
+            r("start_at_login", "Start Laminar when you sign in", "Off until you turn it on. Installed copies only.", Toggle),
             r("check_updates", "Check for updates automatically", "New versions download quietly; an icon in the dock offers to install them.", Toggle),
         ],
         _ => vec![],

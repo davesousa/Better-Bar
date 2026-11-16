@@ -161,7 +161,8 @@ impl Default for Config {
             edge_highlight: 0.55,
             match_windows_theme: true,
             extra_blur: 0.0,
-            start_at_login: true,
+            // Off until the user turns it on (see updater::sync_start_at_login).
+            start_at_login: false,
             check_updates: true,
             update_snooze_until: 0,
             update_skip: String::new(),
