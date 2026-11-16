@@ -1,6 +1,12 @@
-//! `laminar.exe --widget-sheet out.png [light] [filter]`: paint every widget at every
-//! size (three dock widths, small, medium and large cards) into one PNG, with sample
-//! data. A quick way to review layouts without running the dock.
+//! `laminar.exe --widget-sheet out.png [light] [scale=2] [empty] [filter]`: paint every
+//! widget at every size (three dock widths, small, medium and large cards) into one PNG,
+//! with sample data. A quick way to review layouts without running the dock.
+//!
+//! - `light`: light theme (dark is the default)
+//! - `scale=2`: render at 2x (like a 200% display) to check fine detail
+//! - `empty`: no sample data, so connector widgets show their waiting state
+//! - `filter`: a widget id fragment or category name ("clocks"), or a comma-separated
+//!   list of exact ids ("stripe,stripe-chart")
 
 use std::collections::HashMap;
 
@@ -18,7 +24,7 @@ use super::canvas::Canvas;
 use super::catalog::{self, Size};
 use super::{card_size, dock_width, Ctx, Hub, Now};
 
-pub fn run(out: &str, light: bool, filter: Option<&str>) -> Result<()> {
+pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool) -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -26,7 +32,14 @@ pub fn run(out: &str, light: bool, filter: Option<&str>) -> Result<()> {
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         crate::ui::theme::set_light(light);
 
-        let defs: Vec<&'static catalog::Def> = catalog::all().filter(|d| filter.map(|f| d.id.contains(f) || d.cats.iter().any(|c| format!("{c:?}").eq_ignore_ascii_case(f))).unwrap_or(true)).collect();
+        let matches = |d: &catalog::Def, f: &str| {
+            if f.contains(',') {
+                f.split(',').any(|id| id.trim() == d.id)
+            } else {
+                d.id.contains(f) || d.cats.iter().any(|c| format!("{c:?}").eq_ignore_ascii_case(f))
+            }
+        };
+        let defs: Vec<&'static catalog::Def> = catalog::all().filter(|d| filter.map(|f| matches(d, f)).unwrap_or(true)).collect();
         let b = 54.0f32;
         let col_w = 268.0f32;
         let label_w = 150.0;
@@ -37,8 +50,8 @@ pub fn run(out: &str, light: bool, filter: Option<&str>) -> Result<()> {
         let widths: Vec<f32> = defs.iter().map(|d| dock_cols.iter().map(|s| dock_width(d, *s, b) + pad).sum::<f32>()).collect();
         let dock_w = widths.iter().cloned().fold(0.0, f32::max);
         let small_w = card_size(Size::Small, col_w).0;
-        let w = (label_w + dock_w + small_w + col_w * 2.0 + pad * 4.0).ceil() as u32;
-        let h = (defs.len() as f32 * row_h + pad).ceil() as u32;
+        let w = ((label_w + dock_w + small_w + col_w * 2.0 + pad * 4.0) * scale).ceil() as u32;
+        let h = ((defs.len() as f32 * row_h + pad) * scale).ceil() as u32;
 
         let bmp = wic.CreateBitmap(w, h, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand)?;
         let props = D2D1_RENDER_TARGET_PROPERTIES {
@@ -77,7 +90,7 @@ pub fn run(out: &str, light: bool, filter: Option<&str>) -> Result<()> {
             tray: &tray,
             hover_tray: None,
             update: Some(&update),
-            sample: true,
+            sample: !empty,
             now: Now::get(),
         };
 
@@ -89,7 +102,7 @@ pub fn run(out: &str, light: bool, filter: Option<&str>) -> Result<()> {
         let fmt = dw.CreateTextFormat(&HSTRING::from("Segoe UI Variable Text"), None, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0, &HSTRING::from("en-us"))?;
         for (row, def) in defs.iter().enumerate() {
             let y = pad + row as f32 * row_h;
-            dc.SetTransform(&Matrix3x2::identity());
+            dc.SetTransform(&Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: 0.0, M32: 0.0 });
             let name: Vec<u16> = format!("{}\n{}", def.name, def.id).encode_utf16().collect();
             dc.DrawText(&name, &fmt, &D2D_RECT_F { left: pad, top: y, right: label_w, bottom: y + 60.0 }, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             let mut x = label_w;
@@ -106,11 +119,11 @@ pub fn run(out: &str, light: bool, filter: Option<&str>) -> Result<()> {
                 x += cw + pad;
             }
             for (cx, cy, cw, ch, dense) in cells {
-                dc.SetTransform(&Matrix3x2::translation(cx, cy));
-                let canvas = Canvas::new(&dc, &factory, &dw, cw, ch, 1.0, light);
+                dc.SetTransform(&Matrix3x2::translation(cx * scale, cy * scale));
+                let canvas = Canvas::new(&dc, &factory, &dw, cw, ch, scale, light);
                 let painted = super::paint::paint(&canvas, def, &ctx, dense, &wic);
                 drop(canvas);
-                dc.SetTransform(&Matrix3x2::translation(cx, cy));
+                dc.SetTransform(&Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: cx * scale, M32: cy * scale });
                 for (ix, iy, isz, _) in &painted.icons {
                     dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: *ix, top: *iy, right: ix + isz, bottom: iy + isz }, radiusX: isz * 0.22, radiusY: isz * 0.22 }, &icon_brush);
                 }

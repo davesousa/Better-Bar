@@ -105,15 +105,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // `--widget-sheet out.png [light] [filter]`: render every widget at every size to a PNG.
+    // `--widget-sheet out.png [light] [scale=2] [empty] [filter]`: render every widget at every size to a PNG.
     if args.first().map(|a| a == "--widget-sheet").unwrap_or(false) {
         unsafe {
             let _ = AttachConsole(ATTACH_PARENT_PROCESS);
         }
         let out = args.get(1).cloned().unwrap_or_else(|| "widgets.png".into());
+        let flag = |a: &str| a == "light" || a == "empty" || a.starts_with("scale=");
         let light = args.iter().any(|a| a == "light");
-        let filter = args.iter().skip(2).find(|a| *a != "light").cloned();
-        if let Err(e) = widgets::sheet::run(&out, light, filter.as_deref()) {
+        let empty = args.iter().any(|a| a == "empty");
+        let scale = args.iter().find_map(|a| a.strip_prefix("scale=")).and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(1.0, 3.0);
+        let filter = args.iter().skip(2).find(|a| !flag(a)).cloned();
+        if let Err(e) = widgets::sheet::run(&out, light, filter.as_deref(), scale, empty) {
             eprintln!("widget sheet failed: {e:?}");
         }
         return Ok(());
