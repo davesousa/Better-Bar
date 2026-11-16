@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 210" width="1200" height="210" role="img" aria-labelledby="t d">
+  <title id="t">Laminar Dock performance</title>
+  <desc id="d">0% CPU when idle. About 17 MB of memory at start, under 30 MB in daily use. About 80 milliseconds from launch to a drawn dock. A 4.4 MB app package with no runtime to install.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#211a5c"/>
+      <stop offset="1" stop-color="#2a1640"/>
+    </linearGradient>
+    <linearGradient id="n1" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#86efac"/><stop offset="1" stop-color="#5eead4"/></linearGradient>
+    <linearGradient id="n2" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#93c5fd"/><stop offset="1" stop-color="#a5b4fc"/></linearGradient>
+    <linearGradient id="n3" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f9a8d4"/><stop offset="1" stop-color="#c4b5fd"/></linearGradient>
+    <linearGradient id="n4" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fdba74"/><stop offset="1" stop-color="#fca5a5"/></linearGradient>
+  </defs>
+  <style>
+    text { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; }
+    .tile { animation: rise .9s cubic-bezier(.2,.8,.2,1) both; }
+    .t2 { animation-delay: .12s; } .t3 { animation-delay: .24s; } .t4 { animation-delay: .36s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+    .flat { stroke-dasharray: 220; animation: draw 3.2s ease-in-out infinite; }
+    @keyframes draw { 0% { stroke-dashoffset: 220; } 45%, 100% { stroke-dashoffset: 0; } }
+    .num { font-size: 58px; font-weight: 700; letter-spacing: -1px; }
+    .lbl { font-size: 19px; font-weight: 600; fill: #fff; }
+    .sub { font-size: 15px; fill: #fff; fill-opacity: .62; }
+    @media (prefers-reduced-motion: reduce) { .tile, .flat { animation: none; } }
+  </style>
+  <rect width="1200" height="210" rx="24" fill="url(#bg)"/>
+
+  <g class="tile">
+    <rect x="16" y="16" width="282" height="178" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/>
+    <text x="40" y="88" class="num" fill="url(#n1)">0%</text>
+    <path class="flat" d="M150 74 H270" stroke="#86efac" stroke-width="3" stroke-linecap="round" fill="none" opacity=".8"/>
+    <text x="40" y="130" class="lbl">CPU when idle</text>
+    <text x="40" y="158" class="sub">it sleeps until something happens</text>
+  </g>
+  <g class="tile t2">
+    <rect x="314" y="16" width="282" height="178" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/>
+    <text x="338" y="88" class="num" fill="url(#n2)">~17 MB</text>
+    <text x="338" y="130" class="lbl">memory at start</text>
+    <text x="338" y="158" class="sub">under 30 MB in daily use</text>
+  </g>
+  <g class="tile t3">
+    <rect x="612" y="16" width="282" height="178" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/>
+    <text x="636" y="88" class="num" fill="url(#n3)">~80 ms</text>
+    <text x="636" y="130" class="lbl">launch to drawn dock</text>
+    <text x="636" y="158" class="sub">native code, no warm-up</text>
+  </g>
+  <g class="tile t4">
+    <rect x="910" y="16" width="274" height="178" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/>
+    <text x="934" y="88" class="num" fill="url(#n4)">4.4 MB</text>
+    <text x="934" y="130" class="lbl">whole app package</text>
+    <text x="934" y="158" class="sub">no runtime to install</text>
+  </g>
+</svg>
