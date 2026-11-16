@@ -13,6 +13,7 @@ pub mod catalog;
 pub mod hub;
 mod paint;
 pub mod sheet;
+pub mod style;
 
 use std::collections::HashMap;
 
@@ -295,7 +296,8 @@ pub fn grouped(n: i64) -> String {
     }
 }
 
-/// Money: "$5,336", "$83.46", "$17.4K".
+/// Money (docs/widget-design.md §2.2): cents only under 100 ("$83.46"), whole amounts to
+/// 9,999 ("$5,336"), compact from 10,000 ("$17.5K", "$1.2M").
 pub fn money(v: f64, currency: Option<&str>) -> String {
     let sym = match currency.unwrap_or("USD") {
         "USD" | "CAD" | "AUD" | "NZD" => "$",
@@ -306,9 +308,9 @@ pub fn money(v: f64, currency: Option<&str>) -> String {
         other => return format!("{} {other}", compact(v)),
     };
     let a = v.abs();
-    let body = if a >= 100_000.0 {
+    let body = if a >= 10_000.0 {
         compact(a)
-    } else if a >= 1000.0 {
+    } else if a >= 100.0 {
         grouped(a.round() as i64)
     } else {
         format!("{a:.2}")

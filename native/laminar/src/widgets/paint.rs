@@ -13,7 +13,8 @@ use std::borrow::Cow;
 use laminar_sys::feed::{Feed, FeedError};
 use windows::Win32::Graphics::Imaging::{IWICBitmapSource, IWICImagingFactory};
 
-use super::canvas::{alpha, hex, Align, Badge, Canvas, Col, Font};
+use super::canvas::{alpha, hex, Align, Badge, Canvas, ChartOpts, Col, Font};
+use super::style::{self, Type};
 use super::catalog::*;
 use super::{compact, dur, headline, hms, money, Ctx, Painted, WAct, DAYS, MONTHS};
 
@@ -63,6 +64,7 @@ const G_CAL: &str = "\u{E787}";
 const G_SCREEN: &str = "\u{E7F4}";
 const G_IMAGE: &str = "\u{E91B}";
 const G_AI: &str = "\u{E99A}";
+const G_WARN: &str = "\u{E7BA}";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Shape {
@@ -110,8 +112,11 @@ fn got<'a>(x: &'a Ctx, conn: &str) -> Got<'a> {
     }
 }
 
+/// The card: fill and a 1 px inner edge, with the dock or Launchpad corner radius.
 fn bg(c: &Canvas, dense: bool) {
-    c.rr(0.0, 0.0, c.w, c.h, if dense { 12.0 } else { 18.0 }, c.card());
+    let r = if dense { style::DOCK_R } else { style::CARD_R };
+    c.rr(0.0, 0.0, c.w, c.h, r, c.card());
+    c.rr_stroke(0.0, 0.0, c.w, c.h, r, c.card_edge(), 1.0);
 }
 
 fn up_down(d: f64) -> Col {
@@ -122,8 +127,85 @@ fn up_down(d: f64) -> Col {
     }
 }
 
-fn delta_str(d: f64) -> String {
-    format!("{}{:.1}%", if d >= 0.0 { "▲ " } else { "▼ " }, d.abs())
+// ------------------------------------------------------------------ formats (§2.2)
+
+/// A change figure: "+12.4%" / "−3.1%" (U+2212 minus), no triangles.
+fn fmt_delta_text(d: f64) -> String {
+    if d.abs() < 0.05 {
+        return "0.0%".into();
+    }
+    format!("{}{:.1}%", if d > 0.0 { "+" } else { "\u{2212}" }, d.abs())
+}
+
+/// A change figure and its colour: green up, red down, text2 for no change. Only use the
+/// colour where "up" is a judgment (money, prices, followers).
+fn fmt_delta(c: &Canvas, d: f64) -> (String, Col) {
+    (fmt_delta_text(d), if d.abs() < 0.05 { c.text2() } else { up_down(d) })
+}
+
+/// "1.9M", "412K", "12.4K", "1,234".
+#[allow(dead_code)]
+fn fmt_compact(v: f64) -> String {
+    compact(v)
+}
+
+/// The tightest form of a number: "5.3K", "17.5K", "412K", "1.9M", "83".
+fn compact_tight(v: f64) -> String {
+    let a = v.abs();
+    let (n, unit) = if a >= 1e9 {
+        (v / 1e9, "B")
+    } else if a >= 1e6 {
+        (v / 1e6, "M")
+    } else if a >= 1e3 {
+        (v / 1e3, "K")
+    } else {
+        return format!("{}", v.round() as i64);
+    };
+    let s = if n.abs() >= 100.0 { format!("{n:.0}") } else { format!("{n:.1}") };
+    format!("{}{unit}", s.strip_suffix(".0").unwrap_or(&s))
+}
+
+/// The compact form of a formatted value ("$5,336" → "$5.3K", "$83.46" → "$83"), keeping
+/// its prefix and suffix. None when there is no shorter form.
+fn compact_str(s: &str) -> Option<String> {
+    let start = s.find(|ch: char| ch.is_ascii_digit())?;
+    let end = s[start..].find(|ch: char| !(ch.is_ascii_digit() || ch == ',' || ch == '.')).map(|e| start + e).unwrap_or(s.len());
+    let num = &s[start..end];
+    let v: f64 = num.replace(',', "").parse().ok()?;
+    let short = compact_tight(v);
+    (short.len() < num.len()).then(|| format!("{}{short}{}", &s[..start], &s[end..]))
+}
+
+/// Money (§2.2): cents under $100, "$5,336" to $9,999, "$12.4K" from $10,000; shortened
+/// further ("$5.3K") when it has more than `budget` characters.
+#[allow(dead_code)]
+fn fmt_money(v: f64, currency: Option<&str>, budget: usize) -> String {
+    let full = money(v, currency);
+    if full.chars().count() <= budget {
+        return full;
+    }
+    compact_str(&full).unwrap_or(full)
+}
+
+/// A key value that must never be cut: the full string if it fits `max_w` at the role's
+/// size, else its compact form, else that shrunk (down to the role's minimum).
+/// Draw the result with a generous `max_w` so it is never ellipsized.
+fn fit_value(c: &Canvas, s: &str, role: Type, max_w: f32) -> (String, f32) {
+    let w = c.measure(s, role.size, role.weight, Font::Text).0;
+    if w <= max_w || w <= 0.0 {
+        return (s.to_string(), role.size);
+    }
+    let s2 = compact_str(s).unwrap_or_else(|| s.to_string());
+    let w2 = c.measure(&s2, role.size, role.weight, Font::Text).0;
+    if w2 <= max_w {
+        return (s2, role.size);
+    }
+    let mut size = (role.size * max_w / w2).max(role.min);
+    // Width isn't quite linear in size (hinting, optical sizes): step down until it fits.
+    while size > role.min && c.measure(&s2, size, role.weight, Font::Text).0 > max_w {
+        size = (size - 0.5).max(role.min);
+    }
+    (s2, size)
 }
 
 /// The largest size (from `start` down to `min`) at which `s` fits in `max_w`.
@@ -141,7 +223,118 @@ fn open_hit(out: &mut Painted, c: &Canvas, open: &str) {
     }
 }
 
+// ------------------------------------------------------------------ template helpers (§3)
+// Family layouts build on these so margins, type and spacing stay the same everywhere.
+
+/// The third line of a Glance block: a footnote, or a meter.
+#[allow(dead_code)]
+enum Line {
+    Text(String),
+    Meter(f32, Col),
+}
+
+/// Header template (Medium/Large): badge 20 and title on one row, an optional trailing
+/// value at the right. Returns where content starts (y 44).
+#[allow(dead_code)]
+fn header(c: &Canvas, badge: &Badge, title: &str, trailing: Option<(&str, Col)>) -> f32 {
+    let m = style::M_CARD;
+    let bs = style::BADGE_HEADER;
+    c.badge(badge, m, m, bs);
+    let mut right = c.w - m;
+    if let Some((t, col)) = trailing {
+        let (v, fs) = fit_value(c, t, style::VALUE, (c.w - 2.0 * m) * 0.5);
+        let w = c.measure(&v, fs, style::VALUE.weight, Font::Text).0;
+        c.text_base(&v, c.w - m, style::HEADER_BASE, fs, style::VALUE.weight, col, Align::Right, c.w);
+        right -= w + style::SP[3];
+    }
+    let tx = m + bs + style::SP[3];
+    c.text_base(title, tx, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, right - tx);
+    style::CONTENT_TOP
+}
+
+/// Glance template (Medium, and the top of Large): hero value, caption, optional third
+/// line or meter, badge 24 top-right.
+#[allow(dead_code)]
+fn glance(c: &Canvas, badge: &Badge, value: &str, caption: &str, third: Option<Line>) {
+    let m = style::M_CARD;
+    let bs = style::BADGE_GLANCE;
+    c.badge(badge, c.w - m - bs, m, bs);
+    let (v, fs) = fit_value(c, value, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
+    c.text_cap(&v, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
+    c.text_base(caption, m, 58.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+    match third {
+        Some(Line::Text(t)) => {
+            c.text_base(&t, m, 76.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - 2.0 * m);
+        }
+        Some(Line::Meter(f, col)) => c.bar(m, 70.0, c.w - 2.0 * m, style::METER_H, f, col),
+        None => {}
+    }
+}
+
+/// A hairline across the card at `y`, inside the margins.
+fn separator(c: &Canvas, y: f32) {
+    c.line(style::M_CARD, y + 0.5, c.w - style::M_CARD, y + 0.5, 1.0, c.sep());
+}
+
+/// The Large detail region under a Glance block: (x, y, w, h), inside the margins.
+fn detail_region(c: &Canvas) -> (f32, f32, f32, f32) {
+    let m = style::M_CARD;
+    (m, style::DETAIL_TOP, c.w - 2.0 * m, c.h - m - style::DETAIL_TOP)
+}
+
+/// List rows from `top`, one per `pitch`, at most `max`: label at the left, trailing
+/// value right-aligned. Returns the bottom of the last row.
+fn rows(c: &Canvas, items: &[(&str, &str)], top: f32, pitch: f32, max: usize) -> f32 {
+    let small = c.w < 180.0;
+    let m = if small { style::M_SMALL } else { style::M_CARD };
+    let ls = if small { style::FOOT.size } else { style::BODY.size };
+    let inner = c.w - 2.0 * m;
+    let n = items.len().min(max);
+    for (k, (label, value)) in items.iter().take(n).enumerate() {
+        let base = top + k as f32 * pitch + (pitch + c.cap_h(ls)) / 2.0;
+        let mut vw = 0.0;
+        if !value.is_empty() {
+            // The value gets what the label leaves, but never squeezes the label under 45%.
+            let lw = c.measure(label, ls, style::BODY.weight, Font::Text).0;
+            let vmax = (inner - lw - style::SP[3]).max(inner * 0.45);
+            vw = c.measure(value, style::FOOT.size, 500, Font::Text).0.min(vmax) + style::SP[3];
+            c.text_base(value, c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, vmax);
+        }
+        c.text_base(label, m, base, ls, style::BODY.weight, c.text1(), Align::Left, inner - vw);
+    }
+    top + n as f32 * pitch
+}
+
+/// Three equal columns of value (17/600) over a footnote label, from `top` (cap top).
+#[allow(dead_code)]
+fn stat_footer(c: &Canvas, items: [(&str, &str); 3], top: f32) {
+    let m = style::M_CARD;
+    let cw = (c.w - 2.0 * m) / 3.0;
+    let base = top + c.cap_h(style::VALUE.size);
+    for (i, (v, label)) in items.iter().enumerate() {
+        let x = m + i as f32 * cw;
+        let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
+        c.text_base(&v, x, base, fs, style::VALUE.weight, c.text1(), Align::Left, c.w);
+        c.text_base(label, x, base + style::SP[6], style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, cw - style::SP[3]);
+    }
+}
+
+/// A loading placeholder bar.
+fn skeleton(c: &Canvas, x: f32, y: f32, w: f32, h: f32) {
+    c.rr(x, y, w, h, (h / 2.0).min(6.0), c.track());
+}
+
+/// A fully round blue button with a white label; adds its hit area.
+#[allow(clippy::too_many_arguments)]
+fn pill_button(c: &Canvas, out: &mut Painted, x: f32, y: f32, w: f32, h: f32, label: &str, act: WAct) {
+    c.rr(x, y, w, h, h / 2.0, c.blue());
+    let fs = style::CAPTION.size;
+    c.text_cap(label, x + w / 2.0, y + (h - c.cap_h(fs)) / 2.0, fs, 600, WHITE, Align::Center, w);
+    out.hits.push(((x, y, w, h), act));
+}
+
 /// What a face shows at a glance.
+#[derive(Clone)]
 enum Vis {
     Badge(Badge),
     /// Progress ring: fraction, colour, text inside (may be empty).
@@ -163,6 +356,14 @@ impl Sum {
     fn new(vis: Vis, value: impl Into<String>, caption: impl Into<String>) -> Self {
         Sum { vis, value: value.into(), caption: caption.into(), delta: None, series: Vec::new(), meter: None }
     }
+    /// The trend's colour: up/down for a change, else the meter's (identity) colour, else blue.
+    fn spark_col(&self) -> Col {
+        match (self.delta, self.meter) {
+            (Some(d), _) => up_down(d),
+            (None, Some((_, col))) => col,
+            _ => BLUE,
+        }
+    }
 }
 
 fn draw_vis(c: &Canvas, v: &Vis, x: f32, y: f32, size: f32) {
@@ -170,17 +371,19 @@ fn draw_vis(c: &Canvas, v: &Vis, x: f32, y: f32, size: f32) {
         Vis::Badge(b) => c.badge(b, x, y, size),
         Vis::Ring(f, col, t) => {
             let r = size / 2.0;
-            let th = (size * 0.12).max(3.0);
+            let th = (size * style::RING_T).max(3.0);
             c.ring(x + r, y + r, r - th / 2.0, th, *f, *col);
-            // Under ~30 px the number inside would be unreadable (the value is shown beside or below).
+            // Under 30 px the number inside would be unreadable (the value is shown beside or below).
             if !t.is_empty() && size >= 30.0 {
-                let fs = fit(c, t, size * 0.27, 7.0, 600, Font::Text, size - 2.0 * th - 4.0);
-                c.text(t, x + r, y + r - fs * 0.68, fs, 600, c.text1(), Align::Center, size, Font::Text);
+                let fs = (size * 0.26).max(style::MINI_VALUE.min);
+                if c.measure(t, fs, 600, Font::Text).0 <= size - 2.0 * th - 4.0 {
+                    c.text_cap(t, x + r, y + r - c.cap_h(fs) / 2.0, fs, 600, c.text1(), Align::Center, size);
+                }
             }
         }
         Vis::Glyph(g, col) => {
-            c.rr(x, y, size, size, size * 0.28, c.ink(0.10));
-            c.glyph(g, x + size / 2.0, y + size / 2.0, size * 0.48, *col);
+            c.rr(x, y, size, size, size * style::BADGE_R, c.plate());
+            c.glyph(g, x + size / 2.0, y + size / 2.0, size * 0.5, *col);
         }
         Vis::Emoji(e) => {
             c.text(e, x + size / 2.0, y + size * 0.02, size * 0.8, 400, c.text1(), Align::Center, size * 1.4, Font::Text);
@@ -188,74 +391,129 @@ fn draw_vis(c: &Canvas, v: &Vis, x: f32, y: f32, size: f32) {
     }
 }
 
-/// Mini, Dock and Small layouts shared by most faces.
+/// What a Dock L pill shows in its accessory slot.
+#[derive(Clone, Copy, PartialEq)]
+enum Slot {
+    None,
+    Spark,
+    Meter,
+    Delta,
+}
+
+/// Mini, Dock M/L and Small layouts shared by most faces (§3).
 fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
     let vcol = c.text1();
     match sh {
         Shape::Mini => {
+            // Dock sizes follow the icon size; the spec is drawn at 54.
+            let k = c.h / 54.0;
+            if let Vis::Ring(f, col, t) = &s.vis {
+                // Visual-led: the ring is the icon, its number inside.
+                let v = style::BADGE_MINI_VIS * k;
+                let t = if t.is_empty() { s.value.clone() } else { t.clone() };
+                draw_vis(c, &Vis::Ring(*f, *col, t), (c.w - v) / 2.0, (c.h - v) / 2.0, v);
+                return;
+            }
             if s.value.is_empty() {
-                let v = c.h * 0.62;
+                let v = style::BADGE_MINI_VIS * k;
                 draw_vis(c, &s.vis, (c.w - v) / 2.0, (c.h - v) / 2.0, v);
                 return;
             }
-            let v = (c.h * 0.46).round();
-            draw_vis(c, &s.vis, (c.w - v) / 2.0, c.h * 0.08, v);
-            let fs = fit(c, &s.value, c.h * 0.24, 8.0, 700, Font::Display, c.w - 6.0);
-            let y = c.h * 0.08 + v + 1.0;
-            c.text(&s.value, c.w / 2.0, y, fs, 700, vcol, Align::Center, c.w - 4.0, Font::Display);
+            // Value-led: a small mark over one compact value.
+            let v = style::BADGE_MINI * k;
+            draw_vis(c, &s.vis, (c.w - v) / 2.0, 8.0 * k, v);
+            let role = Type { size: style::MINI_VALUE.size * k, ..style::MINI_VALUE };
+            let (val, fs) = fit_value(c, &s.value, role, c.w - 2.0 * style::M_MINI * k);
+            c.text_base(&val, c.w / 2.0, 45.0 * k, fs, role.weight, vcol, Align::Center, c.w * 2.0);
         }
         Shape::Dock => {
-            let v = (c.h * 0.56).round();
-            draw_vis(c, &s.vis, (c.h - v) / 2.0, (c.h - v) / 2.0, v);
-            let x0 = c.h * 0.96;
-            let spark = s.series.len() > 2 && c.w > c.h * 3.4;
-            let right = if spark { c.w - c.w * 0.3 - 8.0 } else { c.w - 8.0 };
-            let vs = fit(c, &s.value, (c.h * 0.34).max(13.0), 10.0, 600, Font::Display, right - x0);
-            let cs = (c.h * 0.19).max(9.5);
-            let block = vs * 1.25 + cs * 1.3;
-            let top = (c.h - block) / 2.0 - 1.0;
-            c.text(&s.value, x0, top, vs, 600, vcol, Align::Left, right - x0, Font::Display);
-            match s.delta {
-                Some(d) if c.w > c.h * 2.6 => {
-                    let cap = short_caption(&s.caption);
-                    let cw = c.tw(&cap, x0, top + vs * 1.25, cs, 400, c.text2(), (right - x0) * 0.55);
-                    c.tw(&delta_str(d), x0 + cw + 5.0, top + vs * 1.25, cs, 600, up_down(d), right - x0 - cw - 5.0);
+            let k = c.h / 54.0;
+            let m = style::M_DOCK * k;
+            let bs = style::BADGE_DOCK * k;
+            draw_vis(c, &s.vis, m, (c.h - bs) / 2.0, bs);
+            let x0 = m + bs + style::SP[4] * k;
+            // Dock L (the wide pill) adds one accessory at the right; Dock M never does.
+            let slot = if c.w < c.h * 3.4 {
+                Slot::None
+            } else if s.series.len() > 2 {
+                Slot::Spark
+            } else if s.meter.is_some() {
+                Slot::Meter
+            } else if s.delta.is_some() {
+                Slot::Delta
+            } else {
+                Slot::None
+            };
+            let slot_w = (c.w * 0.34).round();
+            let slot_x = c.w - m - slot_w;
+            let right = if slot == Slot::None { c.w - m } else { slot_x - style::SP[4] * k };
+            let col_meter = s.meter.filter(|_| slot != Slot::Meter);
+            let role = Type { size: style::VALUE.size * k, ..style::VALUE };
+            let (val, fs) = fit_value(c, &s.value, role, right - x0);
+            // With a meter under the caption the three lines move up as one block, so the
+            // caption keeps clear of the value (baseline 40 under a value at 30 touched it).
+            let (val_base, cap_base, bar_y) = if col_meter.is_some() { (23.0, 36.0, 41.0) } else { (30.0, 44.0, 45.0) };
+            let (val_base, cap_base, bar_y) = (val_base * k, cap_base * k, bar_y * k);
+            c.text_base(&val, x0, val_base, fs, role.weight, vcol, Align::Left, c.w * 2.0);
+            let cs = style::FOOT.size * k;
+            // The change shares the caption line only when both fit whole; otherwise the
+            // caption alone (Dock L shows the trend in its slot instead).
+            let cap = short_caption(&s.caption);
+            let both = s.delta.filter(|_| slot != Slot::Delta).map(|d| fmt_delta(c, d)).filter(|(dt, _)| {
+                let gap = if cap.is_empty() { 0.0 } else { style::SP[2] * k };
+                c.measure(&cap, cs, 400, Font::Text).0 + gap + c.measure(dt, cs, 600, Font::Text).0 <= right - x0
+            });
+            match both {
+                Some((dt, dcol)) => {
+                    let cw = if cap.is_empty() { 0.0 } else { c.text_base(&cap, x0, cap_base, cs, 400, c.text2(), Align::Left, right - x0) + style::SP[2] * k };
+                    c.text_base(&dt, x0 + cw, cap_base, cs, 600, dcol, Align::Left, right - x0 - cw);
                 }
-                _ => {
-                    c.tw(&s.caption, x0, top + vs * 1.25, cs, 400, c.text2(), right - x0);
+                None => {
+                    c.text_base(&s.caption, x0, cap_base, cs, 400, c.text2(), Align::Left, right - x0);
                 }
             }
-            if let Some((f, col)) = s.meter.filter(|_| !spark) {
-                c.bar(x0, c.h - (c.h * 0.16).max(7.0), right - x0, (c.h * 0.07).max(3.0), f, col);
+            if let Some((f, col)) = col_meter {
+                c.bar(x0, bar_y, right - x0, 3.0 * k, f, col);
             }
-            if spark {
-                let col = s.delta.map(up_down).unwrap_or(GREEN);
-                c.area(c.w - c.w * 0.3, c.h * 0.22, c.w * 0.3 - 10.0, c.h * 0.56, &s.series, col, true);
+            let (sy0, sy1) = (14.0 * k, 40.0 * k);
+            match slot {
+                Slot::Spark => c.area(slot_x, sy0, slot_w, sy1 - sy0, &s.series, s.spark_col(), true),
+                Slot::Meter => {
+                    if let Some((f, col)) = s.meter {
+                        let pct = format!("{:.0}%", (f * 100.0).clamp(0.0, 999.0));
+                        c.text_base(&pct, c.w - m, 23.0 * k, cs, 500, c.text2(), Align::Right, slot_w);
+                        c.bar(slot_x, 29.0 * k, slot_w, style::METER_H_COMPACT * k, f, col);
+                    }
+                }
+                Slot::Delta => {
+                    if let Some(d) = s.delta {
+                        let (dt, dcol) = fmt_delta(c, d);
+                        c.text_base(&dt, c.w - m, 32.0 * k, style::TITLE.size * k, 600, dcol, Align::Right, slot_w);
+                    }
+                }
+                Slot::None => {}
             }
         }
         _ => {
-            // Small card.
-            let pad = 14.0;
-            let v = 30.0;
-            draw_vis(c, &s.vis, pad, pad, v);
+            // Small card, bottom-anchored: mark and accessory on top, value and caption below.
+            let m = style::M_SMALL;
+            let bs = style::BADGE_SMALL;
+            draw_vis(c, &s.vis, m, m, bs);
+            let (sx0, sx1) = (m + bs + style::SP[4], c.w - m);
+            let mut sy0 = 16.0;
             if let Some(d) = s.delta {
-                c.tr(&delta_str(d), c.w - pad, pad + 2.0, 10.5, 600, up_down(d));
+                let (t, col) = fmt_delta(c, d);
+                c.text_base(&t, sx1, 26.0, style::FOOT.size, 600, col, Align::Right, sx1 - sx0);
+                sy0 = 30.0;
             }
-            // The trend sits in the top row beside the badge (under the change, if any), so
-            // it never runs into the caption below the value.
             if s.series.len() > 2 {
-                let col = s.delta.map(up_down).unwrap_or(GREEN);
-                let sx = pad + v + 10.0;
-                let sy = if s.delta.is_some() { pad + 17.0 } else { pad + 4.0 };
-                c.area(sx, sy, c.w - pad - sx, pad + v - sy, &s.series, col, true);
+                c.area(sx0, sy0, sx1 - sx0, 42.0 - sy0, &s.series, s.spark_col(), true);
+            } else if let Some((f, col)) = s.meter {
+                c.bar(sx0, if s.delta.is_some() { 36.0 } else { 27.0 }, sx1 - sx0, style::METER_H_COMPACT, f, col);
             }
-            let vs = fit(c, &s.value, 24.0, 12.0, 600, Font::Display, c.w - 2.0 * pad);
-            let vy = pad + v + 10.0;
-            c.text(&s.value, pad, vy, vs, 600, vcol, Align::Left, c.w - 2.0 * pad, Font::Display);
-            c.tw(&s.caption, pad, vy + vs * 1.28, 11.0, 400, c.text2(), c.w - 2.0 * pad);
-            if let Some((f, col)) = s.meter.filter(|_| s.series.len() <= 2) {
-                c.bar(pad, c.h - 16.0, c.w - 2.0 * pad, 5.0, f, col);
-            }
+            let (v, fs) = fit_value(c, &s.value, style::HERO_S, c.w - 2.0 * m);
+            c.text_base(&v, m, 86.0, fs, style::HERO_S.weight, vcol, Align::Left, c.w * 2.0);
+            c.text_base(&s.caption, m, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
         }
     }
 }
@@ -269,64 +527,144 @@ fn short_caption(cap: &str) -> String {
     }
 }
 
-/// Large cards: details under the medium layout (a chart, else rows).
-fn details(c: &Canvas, f: &Feed, top: f32, col: Col) {
-    let pad = 14.0;
+/// Large cards: the detail region under the medium layout (§3 Large): a history chart,
+/// else up to the rows that fit, inside the margins.
+fn details(c: &Canvas, f: &Feed, col: Col) {
+    let (x, y, w, h) = detail_region(c);
     if f.series.len() > 2 {
-        c.line(pad, top - 6.0, c.w - pad, top - 6.0, 1.0, c.ink(0.08));
-        c.area(pad, top + 6.0, c.w - 2.0 * pad, c.h - top - 18.0, &f.series, col, true);
+        separator(c, style::SEP_Y_LARGE);
+        c.chart(x, y, w, h, &f.series, col, ChartOpts { fill: true, dot: true, stroke: style::STROKE, smooth: f.series.len() >= 8 });
         return;
     }
-    let rows: Vec<_> = f.rows.iter().take(((c.h - top - 10.0) / 24.0) as usize).collect();
-    if rows.is_empty() {
+    let items: Vec<(&str, &str)> = f.rows.iter().map(|r| (r.label.as_str(), r.value.as_str())).collect();
+    if items.is_empty() {
         return;
     }
-    c.line(pad, top - 6.0, c.w - pad, top - 6.0, 1.0, c.ink(0.08));
-    for (k, r) in rows.iter().enumerate() {
-        let y = top + 4.0 + k as f32 * 24.0;
-        let vw = c.measure(&r.value, 11.5, 500, Font::Text).0.min(c.w * 0.45);
-        c.tw(&r.label, pad, y, 12.0, 400, c.text1(), c.w - 2.0 * pad - vw - 8.0);
-        c.tr(&r.value, c.w - pad, y, 11.5, 500, c.text2());
-    }
+    separator(c, style::SEP_Y_LARGE);
+    // Rows start a little above the region so the first one's capitals sit at its top.
+    let top = y - style::SP[1];
+    let fit_rows = ((c.h - style::M_CARD - top) / style::ROW_L).floor() as usize;
+    rows(c, &items, top, style::ROW_L, fit_rows.min(style::ROWS_MAX_L));
 }
 
-/// The whole-card fallback for connector faces that have no data.
-fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &'static str, g: &Got, sh: Shape) -> bool {
-    let (sub, connect) = match g {
-        Got::Feed(_) => return false,
-        Got::Loading => ("Loading…".to_string(), false),
-        Got::Setup(m) => (m.clone(), true),
-        Got::Error(m) => (m.clone(), false),
+/// A reason line: text2, starting with an orange warning glyph for errors.
+#[allow(clippy::too_many_arguments)]
+fn reason_line(c: &Canvas, s: &str, x: f32, base: f32, size: f32, err: bool, align: Align, max_w: f32) {
+    let g = if err { 12.0 + style::SP[1] } else { 0.0 };
+    let tw = c.measure(s, size, 400, Font::Text).0.min(max_w - g);
+    let left = match align {
+        Align::Left => x,
+        Align::Center => x - (g + tw) / 2.0,
+        Align::Right => x - g - tw,
     };
+    if err {
+        c.glyph(G_WARN, left + 6.0, base - c.cap_h(size) / 2.0, 12.0, ORANGE);
+    }
+    c.text_base(s, left + g, base, size, 400, c.text2(), Align::Left, max_w - g);
+}
+
+/// The whole-card fallback for connector faces that have no data (§7): a skeleton while
+/// loading, the Connect layout when it needs setting up, the reason when it failed.
+fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &'static str, g: &Got, sh: Shape) -> bool {
+    let (loading, connect, reason) = match g {
+        Got::Feed(_) => return false,
+        Got::Loading => (true, false, String::new()),
+        Got::Setup(m) => (false, true, m.clone()),
+        Got::Error(m) => (false, false, m.clone()),
+    };
+    let err = !loading && !connect;
     if connect {
         out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect(conn)));
     }
     match sh {
-        Shape::Mini => compact_sum(c, &Sum::new(Vis::Badge(*badge), if connect { "Connect" } else { "" }, ""), sh),
-        Shape::Dock => compact_sum(c, &Sum::new(Vis::Badge(*badge), name, if connect { "Click to connect".to_string() } else { sub }), sh),
-        Shape::Small => {
-            c.badge(badge, 14.0, 14.0, 30.0);
-            c.tw(name, 14.0, 54.0, 13.0, 600, c.text1(), c.w - 28.0);
-            c.text(&sub, 14.0, 74.0, 10.5, 400, c.text2(), Align::Left, c.w - 28.0, Font::Text);
-            if connect {
-                c.rr(14.0, c.h - 34.0, c.w - 28.0, 24.0, 12.0, BLUE);
-                c.tc("Connect", c.w / 2.0, c.h - 30.0, 11.5, 600, WHITE, c.w - 28.0);
+        Shape::Mini => {
+            let k = c.h / 54.0;
+            let bs = 30.0 * k;
+            let (bx, by) = ((c.w - bs) / 2.0, (c.h - bs) / 2.0);
+            c.badge(badge, bx, by, bs);
+            if connect || err {
+                let (dx, dy, r) = (bx + bs - 1.0 * k, by + 1.0 * k, 3.5 * k);
+                c.circle(dx, dy, r + 1.5 * k, c.halo());
+                c.circle(dx, dy, r, if connect { BLUE } else { ORANGE });
             }
         }
-        _ => {
-            c.badge(badge, 16.0, 16.0, 34.0);
-            c.tw(name, 62.0, 18.0, 14.0, 600, c.text1(), c.w - 78.0);
-            c.tw(&sub, 62.0, 38.0, 11.5, 400, c.text2(), c.w - 78.0);
+        Shape::Dock => {
+            let k = c.h / 54.0;
+            let m = style::M_DOCK * k;
+            let bs = style::BADGE_DOCK * k;
+            c.badge(badge, m, (c.h - bs) / 2.0, bs);
+            let x0 = m + bs + style::SP[4] * k;
+            let tw = c.w - m - x0;
+            if loading {
+                skeleton(c, x0, (c.h - 10.0 * k) / 2.0, (60.0 * k).min(tw), 10.0 * k);
+            } else {
+                c.text_base(name, x0, 30.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, tw);
+                if connect {
+                    c.text_base("Connect", x0, 44.0 * k, style::FOOT.size * k, 600, BLUE, Align::Left, tw);
+                } else {
+                    reason_line(c, &reason, x0, 44.0 * k, style::FOOT.size * k, err, Align::Left, tw);
+                }
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            c.badge(badge, m, m, style::BADGE_SMALL);
+            let inner = c.w - 2.0 * m;
+            if loading {
+                let ch = c.cap_h(style::HERO_S.size);
+                skeleton(c, m, 86.0 - ch, inner * 0.6, ch);
+                skeleton(c, m, 106.0 - 8.0, 40.0, 8.0);
+            } else {
+                // Name and reason sit above the pill on the bottom margin.
+                let pill_y = c.h - m - 26.0;
+                let (nb, rb) = if connect { (pill_y - 22.0, pill_y - 7.0) } else { (86.0, 106.0) };
+                c.text_base(name, m, nb, style::TITLE.size, 600, c.text1(), Align::Left, inner);
+                reason_line(c, &reason, m, rb, style::FOOT.size, err, Align::Left, inner);
+                if connect {
+                    pill_button(c, out, m, pill_y, inner, 26.0, "Connect", WAct::Connect(conn));
+                }
+            }
+        }
+        Shape::Medium | Shape::Large if loading => {
+            let m = style::M_CARD;
+            let bs = style::BADGE_GLANCE;
+            c.badge(badge, c.w - m - bs, m, bs);
+            skeleton(c, m, m, (c.w - 2.0 * m - bs - style::SP[3]) * 0.6, c.cap_h(style::HERO.size));
+            skeleton(c, m, 58.0 - 8.0, 40.0, 8.0);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let (x, y, w, _) = detail_region(c);
+                for (i, f) in [1.0, 0.75, 0.5].iter().enumerate() {
+                    skeleton(c, x, y + 4.0 + i as f32 * style::ROW_L, w * f, 8.0);
+                }
+            }
+        }
+        Shape::Medium => {
+            let m = style::M_CARD;
+            let bs = style::BADGE_SMALL;
+            c.badge(badge, m, m, bs);
+            let x0 = m + bs + style::SP[5];
+            c.text_base(name, x0, 29.0, 15.0, 600, c.text1(), Align::Left, c.w - m - x0);
+            reason_line(c, &reason, x0, 46.0, style::CAPTION.size, err, Align::Left, c.w - m - x0);
             if connect {
-                let (bw, bh) = (86.0, 26.0);
-                let (bx, by) = (c.w - bw - 14.0, c.h - bh - 12.0);
-                c.rr(bx, by, bw, bh, bh / 2.0, BLUE);
-                c.tc("Connect", bx + bw / 2.0, by + 5.0, 12.0, 600, WHITE, bw);
+                let (bw, bh) = (88.0, 28.0);
+                pill_button(c, out, c.w - m - bw, c.h - m - bh, bw, bh, "Connect", WAct::Connect(conn));
+            }
+        }
+        Shape::Large => {
+            let bs = 48.0;
+            c.badge(badge, (c.w - bs) / 2.0, 36.0, bs);
+            c.text_base(name, c.w / 2.0, 108.0, 15.0, 600, c.text1(), Align::Center, c.w - 2.0 * style::M_CARD);
+            reason_line(c, &reason, c.w / 2.0, 128.0, style::CAPTION.size, err, Align::Center, c.w - 2.0 * style::M_CARD);
+            if connect {
+                let (bw, bh) = (132.0, 30.0);
+                pill_button(c, out, (c.w - bw) / 2.0, 150.0, bw, bh, "Connect", WAct::Connect(conn));
             }
         }
     }
     true
 }
+
 
 pub fn paint(c: &Canvas, def: &Def, x: &Ctx, dense: bool, wic: &IWICImagingFactory) -> Painted {
     let mut out = Painted::default();
@@ -392,7 +730,7 @@ fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     };
     let cw = c.tw(&caption, 16.0, 58.0, 12.0, 400, c.text2(), c.w - 120.0);
     if let Some(d) = f.delta_pct {
-        c.tw(&delta_str(d), 22.0 + cw, 58.0, 11.5, 600, up_down(d), 90.0);
+        c.tw(&fmt_delta_text(d), 22.0 + cw, 58.0, 11.5, 600, up_down(d), 90.0);
     }
     // Mail: the newest subject under the count (Large lists it with the others instead).
     if conn == "gmail" && sh != Shape::Large {
@@ -401,7 +739,7 @@ fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
         }
     }
     if sh == Shape::Large {
-        details(c, &f, 100.0, f.delta_pct.map(up_down).unwrap_or(GREEN));
+        details(c, &f, f.delta_pct.map(up_down).unwrap_or(GREEN));
     } else if f.series.len() > 2 {
         c.area(c.w - 120.0, 64.0, 104.0, 20.0, &f.series, GREEN, false);
     }
@@ -436,7 +774,7 @@ fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
     c.tr(&value, c.w - 14.0, 9.0, 16.0, 600, c.text1());
     match f.delta_pct {
         Some(d) => {
-            c.tr(&delta_str(d), c.w - 14.0, 30.0, 10.5, 600, up_down(d));
+            c.tr(&fmt_delta_text(d), c.w - 14.0, 30.0, 10.5, 600, up_down(d));
         }
         None => {
             c.tr(&f.caption, c.w - 14.0, 30.0, 10.5, 400, c.text3());
@@ -487,7 +825,7 @@ fn usage(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
         c.tr(&format!("≈ {}", money(cost, None)), c.w - 16.0, 20.0, 11.0, 400, c.text3());
     }
     if sh == Shape::Large {
-        details(c, &f, 104.0, CLAUDE);
+        details(c, &f, CLAUDE);
     }
 }
 
@@ -693,7 +1031,7 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
             if sh == Shape::Large {
                 let mut f2 = f.clone().into_owned();
                 f2.rows.retain(|r| r.label != title);
-                details(c, &f2, 100.0, BLUE);
+                details(c, &f2, BLUE);
             }
         }
     }
@@ -2047,7 +2385,7 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     c.tr("Free on C:", c.w - 16.0, 22.0, 12.0, 400, c.text2());
                     c.bar(16.0, 58.0, c.w - 32.0, 8.0, used, if used > 0.9 { RED } else { BLUE });
                     if sh == Shape::Large {
-                        details(c, &f, 88.0, BLUE);
+                        details(c, &f, BLUE);
                     } else {
                         let total = f.rows.first().map(|r| r.value.clone()).unwrap_or_default();
                         c.tw(&total, 16.0, 72.0, 11.0, 400, c.text3(), c.w - 32.0);
@@ -2582,4 +2920,36 @@ fn progress(c: &Canvas, s: Span, x: &Ctx, sh: Shape) {
     }
     c.tw(label, gx, c.h - 24.0, 11.5, 500, c.text2(), c.w * 0.6);
     c.tr(&pct, c.w - gx, c.h - 25.0, 12.5, 600, c.text1());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn change_figures_use_signs_not_triangles() {
+        assert_eq!(fmt_delta_text(12.44), "+12.4%");
+        assert_eq!(fmt_delta_text(-3.1), "\u{2212}3.1%");
+        assert_eq!(fmt_delta_text(0.01), "0.0%");
+    }
+
+    #[test]
+    fn compact_forms_keep_prefix_and_suffix() {
+        assert_eq!(compact_str("$5,336").as_deref(), Some("$5.3K"));
+        assert_eq!(compact_str("$83.46").as_deref(), Some("$83"));
+        assert_eq!(compact_str("1,900,000 tokens").as_deref(), Some("1.9M tokens"));
+        assert_eq!(compact_str("412,000").as_deref(), Some("412K"));
+        assert_eq!(compact_str("82%"), None);
+        assert_eq!(compact_str("Now"), None);
+    }
+
+    #[test]
+    fn money_follows_the_spec() {
+        assert_eq!(money(83.456, None), "$83.46");
+        assert_eq!(money(126.0, None), "$126");
+        assert_eq!(money(5336.0, None), "$5,336");
+        assert_eq!(money(17491.0, None), "$17.5K");
+        assert_eq!(fmt_money(5336.0, None, 5), "$5.3K");
+        assert_eq!(fmt_money(126.0, None, 5), "$126");
+    }
 }

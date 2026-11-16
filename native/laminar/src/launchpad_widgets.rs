@@ -144,7 +144,7 @@ impl Launchpad {
                 return Some(b.clone());
             }
         }
-        let (radius, blur) = (18.0 * s, 16.0 * s);
+        let (radius, blur) = (crate::widgets::style::CARD_R * s, 16.0 * s);
         // Hollow: the cards are translucent glass, so a filled shadow would show through.
         let (surface, insets) = gfx.hollow_shadow_surface(radius, blur, 0.55 * strength, 5.0 * s).ok()?;
         let sb = c.CreateSurfaceBrushWithSurface(&surface).ok()?;
@@ -409,7 +409,7 @@ impl Launchpad {
         };
         // While held, the card is a solid object: back its translucent glass with the
         // panel colour so the slot, hint text and other cards don't show through it.
-        let (backing, _, _) = ui::rounded(c, gw, gh, 18.0 * s, theme::surface(0.94))?;
+        let (backing, _, _) = ui::rounded(c, gw, gh, crate::widgets::style::CARD_R * s, theme::surface(0.94))?;
         body.Children()?.InsertAtBottom(&backing)?;
         // Lift: a little larger, with a deeper shadow under it.
         let lift = c.CreateVector3KeyFrameAnimation()?;
@@ -535,7 +535,7 @@ impl Launchpad {
             }
         }
         if let (Some(r), Some(inner)) = (ph_rect, inner) {
-            if let Ok((ph, _, shape)) = ui::rounded(c, (r.2 * s).round(), (r.3 * s).round(), 18.0 * s, theme::ink(0.05)) {
+            if let Ok((ph, _, shape)) = ui::rounded(c, (r.2 * s).round(), (r.3 * s).round(), crate::widgets::style::CARD_R * s, theme::ink(0.05)) {
                 if let Ok(b) = c.CreateColorBrushWithColor(theme::ink(0.26)) {
                     let _ = shape.SetStrokeBrush(&b);
                 }
