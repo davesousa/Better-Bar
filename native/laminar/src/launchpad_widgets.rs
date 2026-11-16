@@ -89,6 +89,10 @@ pub struct Form {
     pub fields: Vec<FormField>,
     pub focus: usize,
     pub error: Option<String>,
+    /// Waiting on a lookup (weather: finding the place), shown instead of the error.
+    pub busy: Option<String>,
+    /// The place being looked up: only that answer may close this form.
+    pub pending: Option<String>,
 }
 
 const LINK: (f32, f32, f32, f32) = (0.29, 0.62, 1.0, 1.0);
@@ -141,12 +145,13 @@ impl Launchpad {
             }
         }
         let (radius, blur) = (18.0 * s, 16.0 * s);
-        let surface = gfx.shadow_surface(radius, blur, 0.55 * strength).ok()?;
+        // Hollow: the cards are translucent glass, so a filled shadow would show through.
+        let (surface, insets) = gfx.hollow_shadow_surface(radius, blur, 0.55 * strength, 5.0 * s).ok()?;
         let sb = c.CreateSurfaceBrushWithSurface(&surface).ok()?;
         let _ = sb.SetStretch(CompositionStretch::Fill);
         let nine = c.CreateNineGridBrush().ok()?;
         let _ = nine.SetSource(&sb);
-        let _ = nine.SetInsets(radius + blur + 2.0);
+        let _ = nine.SetInsets(insets);
         self.shadow = Some((strength, s, nine.clone()));
         Some(nine)
     }
@@ -402,6 +407,10 @@ impl Launchpad {
                 (def, def.size, card.vis.clone(), card.body.clone(), card.w, card.h, grab)
             }
         };
+        // While held, the card is a solid object: back its translucent glass with the
+        // panel colour so the slot, hint text and other cards don't show through it.
+        let (backing, _, _) = ui::rounded(c, gw, gh, 18.0 * s, theme::surface(0.94))?;
+        body.Children()?.InsertAtBottom(&backing)?;
         // Lift: a little larger, with a deeper shadow under it.
         let lift = c.CreateVector3KeyFrameAnimation()?;
         let e = c.CreateCubicBezierEasingFunction(v2(0.3, 1.4), v2(0.6, 1.0))?;
@@ -755,7 +764,7 @@ impl Launchpad {
                 saved: f.secret && laminar_sys::secrets::has(id, f.key),
             })
             .collect();
-        self.form = Some(Form { conn: id.to_string(), name, about, help_url: help, fields, focus: 0, error: None });
+        self.form = Some(Form { conn: id.to_string(), name, about, help_url: help, fields, focus: 0, error: None, busy: None, pending: None });
         self.query.clear();
     }
 
@@ -870,7 +879,10 @@ impl Launchpad {
             Self::txt(c, gfx, content, "Keys are kept in Windows Credential Manager on this PC (never in config.json) and only sent to the service they belong to.", TextStyle { px: 11.5 * s, color: theme::text_3(), max_w: Some(w), wrap: true, ..Default::default() }, x0, y)?;
             y += 52.0 * s;
         }
-        if let Some(e) = &form.error {
+        if let Some(b) = &form.busy {
+            Self::txt(c, gfx, content, b, TextStyle { px: 12.0 * s, weight: 500, color: theme::text_2(), max_w: Some(w), wrap: true, ..Default::default() }, x0, y)?;
+            y += 24.0 * s;
+        } else if let Some(e) = &form.error {
             Self::txt(c, gfx, content, e, TextStyle { px: 12.0 * s, weight: 500, color: theme::DANGER, max_w: Some(w), wrap: true, ..Default::default() }, x0, y)?;
             y += 24.0 * s;
         }

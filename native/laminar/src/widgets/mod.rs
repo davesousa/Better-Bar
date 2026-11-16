@@ -232,13 +232,26 @@ pub fn render(gfx: &Gfx, surface: &CompositionDrawingSurface, def: &Def, ctx: &C
 
 /// Width in the dock for a widget of `size` at icon size `b`.
 pub fn dock_width(def: &Def, size: Size, b: f32) -> f32 {
-    let medium = def.dock_w.max(2.2);
+    // One width for medium widgets (narrower ones truncated their labels and looked uneven).
+    let medium = def.dock_w.max(2.6);
     (match size {
         Size::Small => 1.0,
         Size::Medium => medium,
         Size::Large => (medium * 1.6).max(3.6),
     } * b)
         .round()
+}
+
+/// The on-this-PC settings form a widget uses (launchpad_widgets::LOCAL_FORMS), with the
+/// menu label that opens it: weather location, world-clock cities, revenue goal.
+pub fn local_form(def: &Def) -> Option<(&'static str, &'static str)> {
+    use catalog::{ClockKind, Face};
+    match def.face {
+        Face::Weather(_) => Some(("weather", "Change Location…")),
+        Face::Clock(ClockKind::World | ClockKind::WorldTime) => Some(("clocks", "Choose Cities…")),
+        Face::Goal => Some(("revenue-goal", "Set Goal…")),
+        _ => None,
+    }
 }
 
 /// The connectors a widget needs fetched.

@@ -277,6 +277,26 @@ Dave's feedback on 0.2.0: drag widgets from the gallery to any place in Launchpa
 
 Checked (agent, 2026-11-15): builds with no warnings; 65 tests pass (4 new: small-card pairing, old and new config entries, always-on widgets, unique ids); every widget at every size reviewed on the widget sheet; the test dock starts and lays out widgets of each size. ⚠️ Not yet checked on screen (the PC locked mid-session): the two columns live, dragging from the gallery and between columns, dragging into the dock, press-and-hold lift, dock widget magnification, the Start reflection, and Settings → Widgets.
 
+### Overnight test and polish run (2026-11-15/16, released in 0.2.3)
+
+Dave asked for a full test and polish pass while away ("widgets still don't magnify correctly"). The PC locked at 22:23, so testing used a **test driver** instead of the real screen: the test copy runs with `LAMINAR_TESTCTL=1` (fake pointer via a `WM_APP+40` message, animations jump to their end, a plain colour behind the glass) and is captured with `PrintWindow`. The driver and helpers (`Drv.cs`, `drv.ps1`, `rt.ps1`, `restart.ps1`) were scratch files and aren't in the repo. Locked-screen captures show stale frames through the glass unless the backdrop is replaced, which is why test mode swaps it.
+
+| Fixed | Cause and fix |
+| --- | --- |
+| Dock widgets didn't magnify correctly | Widget slots scaled from their top-left corner (no centre point set), so they grew down out of the shelf instead of rising. Now they scale from the bottom-left like icons; small widgets magnify as much as icons, wider ones 75%. The shelf-shift expression now counts widgets too, so clicks match what's drawn. |
+| Widgets had no hover label | Dock widgets now show their name above them, centred on their width. |
+| Dark band inside every glass panel and card | The drop shadow was a filled shape under translucent glass. Shadows are now hollow (the panel's own area is cut out), so they only fall outside. |
+| Launchpad's bottom bar unclickable from the dock | While hovered, the dock's window claims the headroom above the shelf, which covers Launchpad's account / Settings / Power row. With Launchpad open, headroom that isn't on a magnified item is now see-through (`WM_NCHITTEST` → `HTTRANSPARENT`). |
+| Changing the weather city didn't save | The lookup result was checked before finished jobs were collected, so it waited for an unrelated later update. Now collected first; the form says "Looking up…", closes when found, shows an error if not, and ignores answers for a cancelled or older lookup. |
+| Local widget settings hard to reach | Right-click menus offer "Change Location…", "Choose Cities…" or "Set Goal…" on the widgets that use them. |
+| Lifted card see-through | A dragged card gets an opaque backing while held. |
+| Settings tab order | About is now last. |
+| Widget review (two reviewers over all 109 × 6 renders) | Fixed the broken or wrong ones: Flip Clock (colon, darker flaps, hours over minutes when small), Now Playing Disc (record instead of a hole over a note), Day Timeline small (title overlapped the total), GitHub Overview dock (showed contributions labelled "Repositories"), Sunrise & Sunset dock (showed the weather), Clock & Weather (PM overlapped the icon; PM beside the time on small), small-card sparklines (crossed the caption; now beside the badge), dock captions ("Last 30 da…" → "30 days"), one medium dock width, tiny ring numbers dropped, list widgets' dock figure matches its label, Quick Controls large (2×2, not tall bars), "today" red everywhere, weekly highs/lows told apart, uptime/battery as "2d 4h" / "4h 10m left", storage rounding, RevenueCat subscribers on the caption line, Mail large duplicate subject, Notes empty state, "Up next" casing, timer ring padding, light-theme emoji (faint silhouette so white clouds show). |
+
+Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup shortcut); on the locked screen through the driver: magnification sweep across every dock item, widget hover labels, Launchpad open, gallery, press-hold lift, drag to reorder, gallery → dock drop into the gap (saved), right-click menus in Launchpad and dock, resize in the dock, Change Location (typed, saved, forecast switched to Ottawa), Settings (Glass sliders, Widgets page), Widget shadow slider at 100% and back, Settings gear reached from the dock, light theme; an independent code review of the night's diff (its two bugs — hover flicker in the see-through headroom, and a stale weather lookup — fixed).
+
+⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
+
 ### Known gaps
 
 - Tray icons (the apps normally beside the clock) aren't hosted yet, and there's no Windows Update status. *(Done 2026-11-10.)*

@@ -568,10 +568,10 @@ pub fn sample(conn: &str) -> Feed {
         "top_cpu" => Feed { value: Some(23.0), unit: "%".into(), rows: vec![row("Microsoft Edge", "8.4%", 0.36), row("Visual Studio Code", "5.1%", 0.22), row("Slack", "2.2%", 0.1), row("Laminar Dock", "0.3%", 0.02)], ..Default::default() },
         "top_memory" => Feed { value: Some(14.2), unit: "GB".into(), rows: vec![row("Microsoft Edge", "2.1 GB", 0.13), row("Visual Studio Code", "1.4 GB", 0.09), row("Slack", "640 MB", 0.04), row("Explorer", "180 MB", 0.01)], ..Default::default() },
         "recent_files" => Feed { value: Some(3.0), rows: vec![row("Quarterly plan.docx", "", 0.0), row("Invoice-1042.pdf", "", 0.0), row("photo.png", "", 0.0)], ..Default::default() },
-        "battery" => Feed { value: Some(82.0), frac: Some(0.82), unit: "%".into(), extra: [("charging".to_string(), "false".to_string()), ("time_left".to_string(), "4 h 10 min".to_string())].into(), ..Default::default() },
+        "battery" => Feed { value: Some(82.0), frac: Some(0.82), unit: "%".into(), extra: [("charging".to_string(), "false".to_string()), ("time_left".to_string(), "4h 10m".to_string())].into(), ..Default::default() },
         "storage" => Feed { value: Some(240.8), unit: "GB".into(), caption: "Free on C:".into(), frac: Some(0.74), rows: vec![row("C:", "240 GB free of 931 GB", 0.74)], ..Default::default() },
         "language" => Feed { text: Some("ENG".into()), caption: "English (Canada)".into(), ..Default::default() },
-        "uptime" => Feed { value: Some(52.0), text: Some("2 d 4 h".into()), caption: "Uptime".into(), ..Default::default() },
+        "uptime" => Feed { value: Some(52.0), text: Some("2d 4h".into()), caption: "Uptime".into(), ..Default::default() },
         "wallpaper" => Feed { text: Some("Today's image".into()), ..Default::default() },
         _ => Feed { value: Some(42.0), ..Default::default() },
     };

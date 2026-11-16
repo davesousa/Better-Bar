@@ -81,6 +81,39 @@ const WM_APP_RESYNC_HOVER: u32 = WM_APP + 5;
 const WM_APP_TRAY: u32 = WM_APP + 6;
 /// An update check finished (see updater.rs).
 const WM_APP_UPDATE: u32 = WM_APP + 7;
+/// Test control (only with LAMINAR_TESTCTL set): lParam is a screen point the dock should
+/// treat as the pointer position. A test driver posts this, then ordinary mouse messages,
+/// so the dock can be exercised (and captured with PrintWindow) without a real mouse,
+/// for example while the session is locked.
+const WM_APP_TESTCTL: u32 = WM_APP + 40;
+
+/// LAMINAR_TESTCTL: pointer driven by WM_APP_TESTCTL instead of the real cursor.
+fn testctl() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("LAMINAR_TESTCTL").is_ok())
+}
+
+static FAKE_CURSOR: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+/// LAMINAR_TESTCTL: a plain stand-in for the desktop behind the glass. In a capture of a
+/// locked session the host backdrop shows this window's own stale frames instead.
+fn test_backdrop(c: &Compositor) -> Option<CompositionBrush> {
+    if !testctl() {
+        return None;
+    }
+    c.CreateColorBrushWithColor(windows::UI::Color { A: 255, R: 38, G: 52, B: 78 }).ok()?.cast().ok()
+}
+
+/// The pointer position: the real cursor, or the test driver's point under LAMINAR_TESTCTL.
+fn get_cursor_pos(p: &mut POINT) -> windows::core::Result<()> {
+    if testctl() {
+        if let Some((x, y)) = FAKE_CURSOR.lock().ok().and_then(|g| *g) {
+            *p = POINT { x, y };
+            return Ok(());
+        }
+    }
+    unsafe { GetCursorPos(p) }
+}
 /// Check for a new Laminar (first soon after start, then every few hours).
 const T_UPDATE_CHECK: usize = 21;
 
@@ -171,8 +204,9 @@ fn widget_size(key: &str) -> crate::widgets::Size {
     }
 }
 
-/// How much widgets magnify, relative to icons (they're wider, so less is plenty).
-const WIDGET_MAG: f32 = 0.5;
+/// How much wide widgets magnify, relative to icons: enough to read as "lifted" without
+/// shoving the rest of the dock aside. Icon-sized (small) widgets magnify like icons.
+const WIDGET_MAG: f32 = 0.75;
 
 /// Pin index of a widget item.
 fn widget_pin(key: &str) -> Option<usize> {
@@ -240,7 +274,7 @@ impl Geo {
         for it in items {
             let (w, v, kx) = if it.kind == Kind::Widget {
                 let ww = widget_of(&it.key).map(|d| crate::widgets::dock_width(d, widget_size(&it.key), b)).unwrap_or(b);
-                (ww + g, ww, k * WIDGET_MAG)
+                (ww + g, ww, if ww <= b * 1.05 { k } else { k * WIDGET_MAG })
             } else if it.is_icon() {
                 (b + g, b, k)
             } else {
@@ -630,6 +664,11 @@ fn with_dock(f: impl FnOnce(&mut Dock)) {
     });
 }
 
+/// Like with_dock, returning a value (None if the dock is busy, e.g. a re-entrant call).
+fn with_dock_ret<T>(f: impl FnOnce(&mut Dock) -> T) -> Option<T> {
+    DOCK.with(|d| d.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
+}
+
 fn hs(s: &str) -> HSTRING {
     HSTRING::from(s)
 }
@@ -683,6 +722,9 @@ fn slowmo() -> f32 {
 
 /// Windows' "Animation effects" setting (Settings > Accessibility > Visual effects).
 fn animations_enabled() -> bool {
+    if testctl() {
+        return false;
+    }
     let mut on = windows::core::BOOL(1);
     unsafe {
         let _ = SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
@@ -953,6 +995,8 @@ impl Dock {
             } else if let (Kind::Widget, Some(def)) = (it.kind, widget_of(&it.key)) {
                 let ww = crate::widgets::dock_width(def, widget_size(&it.key), geo.b);
                 slot.SetSize(v2(ww, geo.b))?;
+                // Grow up and to the right from the bottom-left corner, like an icon.
+                slot.SetCenterPoint(v3(0.0, geo.b, 0.0))?;
                 let tile = c.CreateContainerVisual()?;
                 tile.SetSize(v2(ww, geo.b))?;
                 slot.Children()?.InsertAtTop(&tile)?;
@@ -1062,7 +1106,7 @@ impl Dock {
         // Shelf shift, so the point under the pointer stays put: a running total of the
         // growth of every icon (or the part of it) that lies left of the pointer.
         for i in 0..n {
-            let term = if geo.icon[i] {
+            let term = if geo.kk[i] > 0.0 {
                 format!(
                     "{g} * Clamp((ptr.PointerX - {l}) / {w}, 0, 1)",
                     g = grow_of("s", i),
@@ -1462,6 +1506,11 @@ impl Dock {
     }
 
     fn animate_amount(&self, to: f32, duration_ms: i64) -> Result<()> {
+        if testctl() {
+            // Test captures (PrintWindow on a locked session) don't advance keyframes.
+            let _ = self.ptr.StopAnimation(&hs("Amount"));
+            return self.ptr.InsertScalar(&hs("Amount"), to);
+        }
         let c = &self.compositor;
         let a = c.CreateScalarKeyFrameAnimation()?;
         let ease = c.CreateCubicBezierEasingFunction(v2(0.25, 0.8), v2(0.25, 1.0))?;
@@ -1530,8 +1579,9 @@ impl Dock {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), T_SHRINK);
             }
-            // Simulated pointers (--measure, --demo-hover) must not register for real leave events.
-            if !self.synthetic() {
+            // Simulated pointers (--measure, --demo-hover, LAMINAR_TESTCTL) must not register
+            // for real leave events.
+            if !self.synthetic() && !testctl() {
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                     dwFlags: TME_LEAVE,
@@ -1555,6 +1605,36 @@ impl Dock {
             self.preview_hover(hit);
             let _ = self.show_label(if self.preview.open { None } else { hit });
         }
+    }
+
+    /// While hovering, the dock's window covers the headroom above the shelf (so magnified
+    /// icons stay under the pointer). With Launchpad open that headroom lies over Launchpad's
+    /// bottom bar (account, Settings, Power): a point there that isn't on a magnified item is
+    /// see-through, so it reaches Launchpad (same thread, so HTTRANSPARENT passes it on).
+    fn headroom_passes_through(&self, x: f32, y: f32) -> bool {
+        // Not gated on `hovering`: handing the pointer to Launchpad makes Windows report a
+        // leave, and the next move must not bounce back into the dock (hover flicker).
+        if !self.launchpad.open || self.drag.is_some() || self.tucked {
+            return false;
+        }
+        let g = &self.geo;
+        if y >= g.y0 {
+            return false;
+        }
+        // Top edge of whatever is drawn at x (magnified item, or the shelf).
+        let (dx, scales) = g.layout(x, if self.hovering { 1.0 } else { 0.0 });
+        let mut acc = 0.0;
+        let mut top = g.y0;
+        for i in 0..g.left.len() {
+            let l = dx + g.p + g.left[i] + acc;
+            let slot = g.width[i] + (scales[i] - 1.0) * g.vw[i];
+            if x >= l && x < l + slot && (g.icon[i] || g.wid[i]) {
+                top = top.min(g.y0 + g.p + g.b - g.b * scales[i]);
+            }
+            acc += (scales[i] - 1.0) * g.vw[i];
+        }
+        // Same margin above an item as `Geo::hit` gives it.
+        y < top - g.g
     }
 
     fn on_leave(&mut self) {
@@ -1586,9 +1666,7 @@ impl Dock {
     /// hovers (and Windows will report when it leaves); elsewhere, it leaves (auto-hide).
     fn resync_hover(&mut self) {
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         let win_top = self.monitor.bottom - self.geo.win_h as i32;
         let (x, y) = (p.x - self.monitor.left, p.y - win_top);
         let r = self.region_rect(true);
@@ -1611,7 +1689,7 @@ impl Dock {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), T_REVEAL);
             let mut p = POINT::default();
-            let _ = GetCursorPos(&mut p);
+            let _ = get_cursor_pos(&mut p);
             let edge = self.monitor.bottom - (self.cfg.reveal_zone * self.scale).round() as i32 - 1;
             if p.y >= edge && p.x >= self.monitor.left && p.x < self.monitor.right {
                 trace!("reveal: pointer rested at the bottom edge ({}, {})", p.x, p.y);
@@ -1623,7 +1701,7 @@ impl Dock {
     }
 
     fn show_label(&mut self, idx: Option<usize>) -> Result<()> {
-        let idx = idx.filter(|&i| self.items.get(i).map(|it| it.kind != Kind::Widget).unwrap_or(false));
+        let idx = idx.filter(|&i| i < self.items.len() && i < self.slots.len());
         let c = &self.compositor;
         let fade = c.CreateScalarKeyFrameAnimation()?;
         fade.SetDuration(ms(120))?;
@@ -1636,8 +1714,11 @@ impl Dock {
         let name = match it.kind {
             Kind::Launch => "Launchpad".to_string(),
             Kind::Stack => self.stack_of(&it.key).map(|v| v.1).unwrap_or_else(|| "Stack".into()),
+            Kind::Widget => widget_of(&it.key).map(|d| d.name.to_string()).unwrap_or_else(|| "Widget".into()),
             _ => self.names.get(&it.key).cloned().unwrap_or_else(|| it.key.clone()),
         };
+        // Centred over the item's drawn width (a widget is wider than an icon).
+        let iw = self.geo.vw.get(i).copied().unwrap_or(self.geo.b).max(self.geo.b);
         let (surface, tw, th) = self.gfx.text_surface(&name, 13.0 * s)?;
         self.label_text.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
         let (padx, pady) = (11.0 * s, 5.0 * s);
@@ -1649,7 +1730,7 @@ impl Dock {
         let b = self.geo.b;
         let e = self.expr(
             &format!(
-                "Vector3(d.Offset.X + t.Offset.X + {b} * t.Scale.X / 2 - {hw}, d.Offset.Y + t.Offset.Y + {b} - {b} * t.Scale.Y - {lh} - {gap}, 0)",
+                "Vector3(d.Offset.X + t.Offset.X + {iw} * t.Scale.X / 2 - {hw}, d.Offset.Y + t.Offset.Y + {b} - {b} * t.Scale.Y - {lh} - {gap}, 0)",
                 hw = lw / 2.0,
                 gap = 10.0 * s
             ),
@@ -1767,6 +1848,9 @@ impl Dock {
             if crate::widgets::conns(def).iter().any(|c| laminar_sys::connectors::info(c).map(|i| !i.fields.is_empty()).unwrap_or(false)) {
                 m.push(MenuItem::item("Connect…", CMD_WIDGET_CONNECT));
             }
+            if let Some((_, label)) = crate::widgets::local_form(def) {
+                m.push(MenuItem::item(label, dock_widgets::CMD_WIDGET_LOCAL));
+            }
             if matches!(def.face, crate::widgets::catalog::Face::Timer(_)) {
                 m.push(MenuItem::item("Reset", CMD_WIDGET_RESET));
             }
@@ -1818,9 +1902,7 @@ impl Dock {
         self.menu_ctx = Some((app, wins));
         self.menu_open = true;
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         let p = anchor.unwrap_or(p);
         if let Err(e) = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, m, p, true, self.scale, self.monitor) {
             trace!("menu failed: {e:?}");
@@ -1989,9 +2071,7 @@ impl Dock {
         self.menu_ctx = None;
         self.menu_open = true;
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         if let Err(e) = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, m, p, true, self.scale, self.monitor) {
             trace!("menu failed: {e:?}");
             self.menu_open = false;
@@ -2406,9 +2486,7 @@ impl Dock {
                         self.menu_ctx = None;
                         self.menu_open = true;
                         let mut p = POINT::default();
-                        unsafe {
-                            let _ = GetCursorPos(&mut p);
-                        }
+                        let _ = get_cursor_pos(&mut p);
                         let _ = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, items, p, false, self.scale, self.monitor);
                     }
                 }
@@ -2484,7 +2562,7 @@ impl Dock {
                 }
                 WM_ACTIVATE => {
                     // Clicking another window closes Launchpad (but not our own power menu).
-                    if (wp.0 & 0xFFFF) as u32 == WA_INACTIVE && !self.menu.open && !self.synthetic() {
+                    if (wp.0 & 0xFFFF) as u32 == WA_INACTIVE && !self.menu.open && !self.synthetic() && !testctl() {
                         self.close_launchpad();
                     }
                 }
@@ -2624,9 +2702,7 @@ impl Dock {
             .map(|((id, name), b)| StackApp { id, name, brush: b.as_ref() })
             .collect();
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         let win_top = self.monitor.bottom - self.geo.win_h as i32;
         let (cx, sc) = self.geo.slot_center((p.x - self.monitor.left) as f32, if self.hovering { 1.0 } else { 0.0 }, i);
         let icon_top = self.geo.y0 + self.geo.p + self.geo.b - self.geo.b * sc;
@@ -2788,9 +2864,7 @@ impl Dock {
     fn tray_click(&mut self, key: u64, kind: crate::tray::Click) {
         self.close_launchpad();
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         crate::tray::click(key, kind, p);
     }
 
@@ -3032,9 +3106,7 @@ impl Dock {
                     MenuItem::item("Shut down", CMD_POWER_SHUTDOWN),
                 ];
                 let mut p = POINT::default();
-                unsafe {
-                    let _ = GetCursorPos(&mut p);
-                }
+                let _ = get_cursor_pos(&mut p);
                 self.menu_ctx = None;
                 self.menu_open = true;
                 let _ = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, items, p, true, self.scale, self.monitor);
@@ -3538,9 +3610,7 @@ impl Dock {
             return;
         }
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         let win_top = self.monitor.bottom - self.geo.win_h as i32;
         let local_x = (p.x - self.monitor.left) as f32;
         // Drags don't magnify the icons.
@@ -3705,9 +3775,7 @@ impl Dock {
             g.body.Children()?.InsertAtTop(&tile)?;
         }
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         let half = (size / 2.0) as i32;
         g.popup.show(RECT { left: p.x - half, top: p.y - half, right: p.x + half, bottom: p.y + half }, false);
         Ok(())
@@ -3739,9 +3807,7 @@ impl Dock {
     /// Pointer moved while dragging (client coordinates of the dock window).
     fn drag_move(&mut self, x: f32, y: f32) {
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         self.move_ghost(p.x, p.y);
         let Some(d) = &self.drag else { return };
         let i = d.index;
@@ -4213,7 +4279,25 @@ const HSHELL_FLASH: usize = 0x8006;
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_APP_TESTCTL if testctl() => {
+            let (x, y) = lparam_xy(lp);
+            if let Ok(mut g) = FAKE_CURSOR.lock() {
+                *g = Some((x as i32, y as i32));
+            }
+            return LRESULT(0);
+        }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_NCHITTEST => {
+            let (sx, sy) = lparam_xy(lp);
+            let through = with_dock_ret(|d| {
+                let top = (d.monitor.bottom - d.geo.win_h as i32) as f32;
+                d.headroom_passes_through(sx - d.monitor.left as f32, sy - top)
+            })
+            .unwrap_or(false);
+            if through {
+                return LRESULT(HTTRANSPARENT as isize);
+            }
+        }
         WM_MOUSEMOVE => {
             let (x, y) = lparam_xy(lp);
             with_dock(|d| {
@@ -4382,7 +4466,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         if d.launchpad.open {
                             d.lp_begin_drag(src, px, py);
                             let mut pt = POINT::default();
-                            let _ = GetCursorPos(&mut pt);
+                            let _ = get_cursor_pos(&mut pt);
                             d.lp_drag_move((pt.x - d.monitor.left) as f32, (pt.y - d.monitor.top) as f32);
                         }
                     }
@@ -4416,7 +4500,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 T_PREVIEW_HIDE => unsafe {
                     let _ = KillTimer(Some(hwnd), T_PREVIEW_HIDE);
                     let mut p = POINT::default();
-                    let _ = GetCursorPos(&mut p);
+                    let _ = get_cursor_pos(&mut p);
                     let under = WindowFromPoint(p);
                     if !d.synthetic() && under != d.preview.hwnd() && !(under == d.hwnd && d.hover.is_some()) {
                         d.preview.hide();
@@ -4712,8 +4796,8 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             cfg,
             monitor,
             scale,
-            backdrop: compositor.CreateHostBackdropBrush()?.cast()?,
-            host_backdrop: compositor.CreateHostBackdropBrush()?.cast()?,
+            backdrop: test_backdrop(&compositor).map(Ok).unwrap_or_else(|| compositor.CreateHostBackdropBrush()?.cast())?,
+            host_backdrop: test_backdrop(&compositor).map(Ok).unwrap_or_else(|| compositor.CreateHostBackdropBrush()?.cast())?,
             label: compositor.CreateContainerVisual()?,
             label_geom: compositor.CreateRoundedRectangleGeometry()?,
             label_text: compositor.CreateSpriteVisual()?,

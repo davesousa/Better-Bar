@@ -69,15 +69,15 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// The two largest units of a duration: "3 d 4 h", "3 h 20 min", "12 min", "0 min".
+/// The two largest units of a duration: "3d 4h", "3h 20m", "12m", "0m".
 fn fmt_duration(secs: u64) -> String {
     let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
     if d > 0 {
-        format!("{d} d {h} h")
+        format!("{d}d {h}h")
     } else if h > 0 {
-        format!("{h} h {m} min")
+        format!("{h}h {m}m")
     } else {
-        format!("{m} min")
+        format!("{m}m")
     }
 }
 
@@ -1003,9 +1003,9 @@ mod tests {
         assert_eq!(fmt_tokens(980), "980");
         assert_eq!(fmt_tokens(45_300), "45.3K");
         assert_eq!(fmt_tokens(1_234_567), "1.2M");
-        assert_eq!(fmt_duration(3 * 3600 + 20 * 60 + 5), "3 h 20 min");
-        assert_eq!(fmt_duration(3 * 86_400 + 4 * 3600 + 59), "3 d 4 h");
-        assert_eq!(fmt_duration(12 * 60), "12 min");
+        assert_eq!(fmt_duration(3 * 3600 + 20 * 60 + 5), "3h 20m");
+        assert_eq!(fmt_duration(3 * 86_400 + 4 * 3600 + 59), "3d 4h");
+        assert_eq!(fmt_duration(12 * 60), "12m");
         assert_eq!(exe_stem("Chrome.EXE"), "Chrome");
     }
 

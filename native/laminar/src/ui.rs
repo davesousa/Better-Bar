@@ -209,12 +209,12 @@ pub fn panel(
     root.SetSize(v2(w + 2.0 * margin, h + 2.0 * margin))?;
     // Shadow, slightly offset downwards.
     // `shadow` 0..1 (Settings → Glass → Panel shadow); 0.42 was the original strength.
-    let sh = gfx.shadow_surface(radius, blur, shadow.clamp(0.0, 1.0))?;
+    let (sh, insets) = gfx.hollow_shadow_surface(radius, blur, shadow.clamp(0.0, 1.0), 6.0 * scale)?;
     let sb = c.CreateSurfaceBrushWithSurface(&sh)?;
     sb.SetStretch(CompositionStretch::Fill)?;
     let nine = c.CreateNineGridBrush()?;
     nine.SetSource(&sb)?;
-    nine.SetInsets(radius + blur + 2.0)?;
+    nine.SetInsets(insets)?;
     let shadow = c.CreateSpriteVisual()?;
     shadow.SetBrush(&nine)?;
     shadow.SetSize(v2(w + 2.0 * blur, h + 2.0 * blur))?;
@@ -240,8 +240,41 @@ pub fn panel(
     Ok(Panel { root, body, content, margin, w, h })
 }
 
+/// LAMINAR_TESTCTL (test driver): animations jump to their end. Keyframes only advance
+/// on composed frames, which a locked session (where the overnight tests run) barely has,
+/// so captures would show half-finished fades.
+pub fn instant() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("LAMINAR_TESTCTL").is_ok())
+}
+
+/// Set an animatable property at once. Visual properties are set directly (so later
+/// direct sets still work); property-set values are inserted.
+fn set_now(c: &Compositor, obj: &CompositionObject, prop: &str, v: [f32; 3], scalar: bool) -> Result<()> {
+    let _ = c;
+    let _ = obj.StopAnimation(&hs(prop));
+    if let Ok(vis) = obj.cast::<Visual>() {
+        return match prop {
+            "Opacity" => vis.SetOpacity(v[0]),
+            "Offset" => vis.SetOffset(v3(v[0], v[1], v[2])),
+            "Scale" => vis.SetScale(v3(v[0], v[1], v[2])),
+            _ => {
+                let e = c.CreateExpressionAnimationWithExpression(&hs(&if scalar { format!("{:.6}", v[0]) } else { format!("Vector3({:.6}, {:.6}, {:.6})", v[0], v[1], v[2]) }))?;
+                obj.StartAnimation(&hs(prop), &e)
+            }
+        };
+    }
+    if let Ok(ps) = obj.cast::<CompositionPropertySet>() {
+        return if scalar { ps.InsertScalar(&hs(prop), v[0]) } else { ps.InsertVector3(&hs(prop), v3(v[0], v[1], v[2])) };
+    }
+    Ok(())
+}
+
 /// Animate a scalar property to `to` over `dur` ms with a smooth ease-out.
 pub fn animate_scalar(c: &Compositor, obj: &CompositionObject, prop: &str, to: f32, dur: i64) -> Result<()> {
+    if instant() {
+        return set_now(c, obj, prop, [to, 0.0, 0.0], true);
+    }
     let a = c.CreateScalarKeyFrameAnimation()?;
     let e = c.CreateCubicBezierEasingFunction(v2(0.2, 0.8), v2(0.2, 1.0))?;
     a.InsertKeyFrameWithEasingFunction(1.0, to, &e)?;
@@ -251,6 +284,9 @@ pub fn animate_scalar(c: &Compositor, obj: &CompositionObject, prop: &str, to: f
 
 /// Animate a Vector3 property (Offset, Scale) to `to` over `dur` ms with a smooth ease-out.
 pub fn animate_v3(c: &Compositor, obj: &CompositionObject, prop: &str, to: Vector3, dur: i64) -> Result<()> {
+    if instant() {
+        return set_now(c, obj, prop, [to.X, to.Y, to.Z], false);
+    }
     let a = c.CreateVector3KeyFrameAnimation()?;
     let e = c.CreateCubicBezierEasingFunction(v2(0.2, 0.8), v2(0.2, 1.0))?;
     a.InsertKeyFrameWithEasingFunction(1.0, to, &e)?;
@@ -260,6 +296,10 @@ pub fn animate_v3(c: &Compositor, obj: &CompositionObject, prop: &str, to: Vecto
 
 /// Same, from an explicit start value.
 pub fn animate_v3_from(c: &Compositor, obj: &CompositionObject, prop: &str, from: Vector3, to: Vector3, dur: i64) -> Result<()> {
+    if instant() {
+        let _ = from;
+        return set_now(c, obj, prop, [to.X, to.Y, to.Z], false);
+    }
     let a = c.CreateVector3KeyFrameAnimation()?;
     let e = c.CreateCubicBezierEasingFunction(v2(0.2, 0.9), v2(0.2, 1.0))?;
     a.InsertKeyFrame(0.0, from)?;

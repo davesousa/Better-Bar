@@ -125,6 +125,8 @@ struct Row {
 }
 
 const SECTION_NAMES: [&str; 5] = ["Dock", "Glass", "Behavior", "About", "Widgets"];
+/// The order the tabs are shown in (section numbers stay as above; About goes last).
+const TAB_ORDER: [usize; 5] = [0, 1, 2, 4, 3];
 
 fn section_rows(i: usize) -> Vec<Row> {
     use Ctl::*;
@@ -866,8 +868,9 @@ impl Launchpad {
         let tab_w = 104.0 * s;
         let tw = tab_w * SECTION_NAMES.len() as f32 + 6.0 * s;
         Self::rect(c, content, pad, ty, tw, 34.0 * s, 10.0 * s, theme::ink(0.10))?;
-        for (k, name) in SECTION_NAMES.iter().enumerate() {
-            let x = pad + 3.0 * s + k as f32 * tab_w;
+        for (pos, &k) in TAB_ORDER.iter().enumerate() {
+            let name = SECTION_NAMES[k];
+            let x = pad + 3.0 * s + pos as f32 * tab_w;
             if k == sec {
                 Self::rect(c, content, x, ty + 3.0 * s, tab_w, 28.0 * s, 8.0 * s, theme::ink(0.22))?;
             }

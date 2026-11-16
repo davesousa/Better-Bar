@@ -172,7 +172,8 @@ fn draw_vis(c: &Canvas, v: &Vis, x: f32, y: f32, size: f32) {
             let r = size / 2.0;
             let th = (size * 0.12).max(3.0);
             c.ring(x + r, y + r, r - th / 2.0, th, *f, *col);
-            if !t.is_empty() {
+            // Under ~30 px the number inside would be unreadable (the value is shown beside or below).
+            if !t.is_empty() && size >= 30.0 {
                 let fs = fit(c, t, size * 0.27, 7.0, 600, Font::Text, size - 2.0 * th - 4.0);
                 c.text(t, x + r, y + r - fs * 0.68, fs, 600, c.text1(), Align::Center, size, Font::Text);
             }
@@ -216,7 +217,8 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             c.text(&s.value, x0, top, vs, 600, vcol, Align::Left, right - x0, Font::Display);
             match s.delta {
                 Some(d) if c.w > c.h * 2.6 => {
-                    let cw = c.tw(&s.caption, x0, top + vs * 1.25, cs, 400, c.text2(), (right - x0) * 0.55);
+                    let cap = short_caption(&s.caption);
+                    let cw = c.tw(&cap, x0, top + vs * 1.25, cs, 400, c.text2(), (right - x0) * 0.55);
                     c.tw(&delta_str(d), x0 + cw + 5.0, top + vs * 1.25, cs, 600, up_down(d), right - x0 - cw - 5.0);
                 }
                 _ => {
@@ -239,17 +241,31 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             if let Some(d) = s.delta {
                 c.tr(&delta_str(d), c.w - pad, pad + 2.0, 10.5, 600, up_down(d));
             }
-            let vs = fit(c, &s.value, 24.0, 12.0, 600, Font::Display, c.w - 2.0 * pad);
-            let vy = pad + v + 8.0;
-            c.text(&s.value, pad, vy, vs, 600, vcol, Align::Left, c.w - 2.0 * pad, Font::Display);
-            c.tw(&s.caption, pad, vy + vs * 1.28, 11.0, 400, c.text2(), c.w - 2.0 * pad);
+            // The trend sits in the top row beside the badge (under the change, if any), so
+            // it never runs into the caption below the value.
             if s.series.len() > 2 {
                 let col = s.delta.map(up_down).unwrap_or(GREEN);
-                c.area(pad, c.h - 24.0, c.w - 2.0 * pad, 14.0, &s.series, col, true);
-            } else if let Some((f, col)) = s.meter {
+                let sx = pad + v + 10.0;
+                let sy = if s.delta.is_some() { pad + 17.0 } else { pad + 4.0 };
+                c.area(sx, sy, c.w - pad - sx, pad + v - sy, &s.series, col, true);
+            }
+            let vs = fit(c, &s.value, 24.0, 12.0, 600, Font::Display, c.w - 2.0 * pad);
+            let vy = pad + v + 10.0;
+            c.text(&s.value, pad, vy, vs, 600, vcol, Align::Left, c.w - 2.0 * pad, Font::Display);
+            c.tw(&s.caption, pad, vy + vs * 1.28, 11.0, 400, c.text2(), c.w - 2.0 * pad);
+            if let Some((f, col)) = s.meter.filter(|_| s.series.len() <= 2) {
                 c.bar(pad, c.h - 16.0, c.w - 2.0 * pad, 5.0, f, col);
             }
         }
+    }
+}
+
+/// A caption short enough to share a dock pill with a change figure.
+fn short_caption(cap: &str) -> String {
+    let t = cap.trim();
+    match t.strip_prefix("Last ") {
+        Some(rest) if rest.ends_with(" days") => rest.to_string(),
+        _ => t.to_string(),
     }
 }
 
@@ -369,13 +385,17 @@ fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     }
     c.badge(badge, c.w - 16.0 - 34.0, 16.0, 34.0);
     c.num(&value, 16.0, 14.0, fit(c, &value, 32.0, 18.0, 600, Font::Display, c.w - 80.0), 600, c.text1());
+    // Subscribers share the caption's line ("MRR · 812 subscribers"), not a floating corner.
+    let caption = match f.extra.get("active_subscriptions") {
+        Some(n) => format!("{caption} · {n} subscribers"),
+        None => caption,
+    };
     let cw = c.tw(&caption, 16.0, 58.0, 12.0, 400, c.text2(), c.w - 120.0);
     if let Some(d) = f.delta_pct {
         c.tw(&delta_str(d), 22.0 + cw, 58.0, 11.5, 600, up_down(d), 90.0);
     }
-    if let Some(n) = f.extra.get("active_subscriptions") {
-        c.tr(&format!("{n} subscribers"), c.w - 16.0, 70.0, 11.0, 400, c.text3());
-    } else if conn == "gmail" {
+    // Mail: the newest subject under the count (Large lists it with the others instead).
+    if conn == "gmail" && sh != Shape::Large {
         if let Some(r) = f.rows.first() {
             c.tw(&r.label, 16.0, 74.0, 11.0, 400, c.text3(), c.w - 32.0);
         }
@@ -550,8 +570,15 @@ fn list(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     open_hit(out, c, open);
     let value = if conn == "calendar" { format!("{} today", f.value.unwrap_or(0.0)) } else { headline(&f) };
     if matches!(sh, Shape::Mini | Shape::Dock) {
-        let first = f.rows.first().map(|r| r.label.clone()).unwrap_or_default();
-        compact_sum(c, &Sum::new(Vis::Badge(*badge), value, first), sh);
+        // A value and the label that belongs to it: the first row's own figure when it has
+        // one ("42 Repositories", "12% Microsoft Edge"), not the headline beside a row name.
+        let first = f.rows.first();
+        let (v, cap) = match first {
+            Some(r) if conn != "calendar" && conn != "recent_files" && !r.value.is_empty() && r.value.chars().count() <= 10 => (r.value.clone(), r.label.clone()),
+            Some(r) => (value, r.label.clone()),
+            None => (value, def.name.to_string()),
+        };
+        compact_sum(c, &Sum::new(Vis::Badge(*badge), v, cap), sh);
         return;
     }
     let small = sh == Shape::Small;
@@ -646,7 +673,7 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
         Shape::Dock => compact_sum(c, &Sum::new(Vis::Badge(badge), title, if soon.is_empty() { when } else { soon }), sh),
         Shape::Small => {
             c.badge(&badge, 14.0, 14.0, 26.0);
-            c.tw("UP NEXT", 48.0, 20.0, 10.0, 700, RED, c.w - 60.0);
+            c.tw("Up next", 48.0, 20.0, 10.5, 600, RED, c.w - 60.0);
             c.text(&title, 14.0, 48.0, 13.5, 600, c.text1(), Align::Left, c.w - 28.0, Font::Text);
             c.tw(&when, 14.0, 70.0, 11.0, 400, c.text2(), c.w - 28.0);
             if !soon.is_empty() {
@@ -956,10 +983,11 @@ fn week_row(c: &Canvas, n: &super::Now, x0: f32, y0: f32, w: f32, h: f32) {
         let shown = if d < 1 { d + prev } else if d > dim { d - dim } else { d };
         let cx = x0 + colw * (i as f32 + 0.5);
         let today = off == 0;
-        c.tc(&DAYS[i as usize][..1], cx, y0, ls, 600, if today { BLUE } else { c.text3() }, colw);
+        // Today in red, as in every calendar face (month grid, date tile, day page).
+        c.tc(&DAYS[i as usize][..1], cx, y0, ls, 600, if today { RED } else { c.text3() }, colw);
         let cy = y0 + ls * 1.5 + (h - ls * 1.5) / 2.0;
         if today {
-            c.circle(cx, cy, r, BLUE);
+            c.circle(cx, cy, r, RED);
         }
         c.tc(&shown.to_string(), cx, cy - fs * 0.68, fs, if today { 700 } else { 500 }, if today { WHITE } else { c.text1() }, colw);
     }
@@ -1032,9 +1060,11 @@ fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, sh: Shape) {
                     }
                 }
                 Shape::Small => {
-                    let fs = fit(c, &time, 40.0, 20.0, 300, Font::Display, c.w - 28.0);
-                    c.num(&time, 14.0, 16.0, fs, 300, c.text1());
-                    c.tw(ampm(n.hour), 16.0, 16.0 + fs * 1.22, 11.0, 600, c.text2(), 40.0);
+                    // AM/PM beside the minutes, not on a line of its own.
+                    let aw = c.measure(ampm(n.hour), 11.0, 600, Font::Text).0;
+                    let fs = fit(c, &time, 40.0, 20.0, 300, Font::Display, c.w - 28.0 - aw - 3.0);
+                    let tw = c.num(&time, 14.0, 16.0, fs, 300, c.text1());
+                    c.tw(ampm(n.hour), 14.0 + tw + 3.0, 16.0 + fs * 0.62, 11.0, 600, c.text2(), 40.0);
                     match weather {
                         Some((e, t)) => {
                             c.text(e, 14.0, c.h - 36.0, 18.0, 400, c.text1(), Align::Left, 30.0, Font::Text);
@@ -1062,9 +1092,15 @@ fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, sh: Shape) {
                 }
                 Shape::Large => {
                     // Big time with seconds, the date, and this week underneath.
-                    let tw = c.num(&time, 16.0, 6.0, 64.0, 200, c.text1());
-                    c.num(&format!(":{:02}", n.second), 20.0 + tw, 38.0, 26.0, 300, c.text3());
-                    c.tw(ampm(n.hour), 20.0 + tw + 42.0, 42.0, 16.0, 500, c.text2(), 40.0);
+                    if weather.is_some() {
+                        // The weather takes the right side: no seconds, so AM/PM has room.
+                        let tw = c.num(&time, 16.0, 8.0, 58.0, 200, c.text1());
+                        c.tw(ampm(n.hour), 20.0 + tw, 42.0, 16.0, 500, c.text2(), 40.0);
+                    } else {
+                        let tw = c.num(&time, 16.0, 6.0, 64.0, 200, c.text1());
+                        c.num(&format!(":{:02}", n.second), 20.0 + tw, 38.0, 26.0, 300, c.text3());
+                        c.tw(ampm(n.hour), 20.0 + tw + 42.0, 42.0, 16.0, 500, c.text2(), 40.0);
+                    }
                     c.tw(&date_long, 18.0, 86.0, 13.0, 500, c.text2(), c.w - 36.0);
                     if let Some((e, t)) = weather {
                         c.text(e, c.w - 56.0, 18.0, 30.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
@@ -1076,23 +1112,47 @@ fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, sh: Shape) {
         }
         ClockKind::Flip => {
             let digits = [h12(n.hour) / 10, h12(n.hour) % 10, n.minute / 10, n.minute % 10];
-            let dense = matches!(sh, Shape::Mini | Shape::Dock);
-            let pad = if dense { 5.0 } else { 14.0 };
-            let gap = if dense { 2.0 } else { 6.0 };
-            let mid = if dense { 5.0 } else { 12.0 };
-            let tw = (c.w - 2.0 * pad - 3.0 * gap - mid) / 4.0;
-            let th = (c.h - 2.0 * pad).min(tw * 1.5);
-            let top = (c.h - th) / 2.0;
-            let mut tx = pad;
-            for (i, d) in digits.iter().enumerate() {
-                if i == 2 {
-                    tx += mid - gap;
+            let tile_col = if c.light { (0.13, 0.13, 0.15, 1.0) } else { (0.06, 0.06, 0.075, 1.0) };
+            let tile = |tx: f32, ty: f32, tw: f32, th: f32, d: u32| {
+                c.rr(tx, ty, tw, th, tw * 0.16, tile_col);
+                // Upper half a touch lighter, like a real flap.
+                c.rr(tx, ty, tw, th / 2.0, tw * 0.16, (1.0, 1.0, 1.0, 0.035));
+                let fs = (th * 0.66).min(tw * 1.08);
+                c.text(&d.to_string(), tx + tw / 2.0, ty + th / 2.0 - fs * 0.68, fs, 600, (0.97, 0.97, 0.98, 1.0), Align::Center, tw, Font::Display);
+                c.line(tx + 1.0, ty + th / 2.0, tx + tw - 1.0, ty + th / 2.0, 1.0, (0.0, 0.0, 0.0, 0.55));
+            };
+            if matches!(sh, Shape::Mini | Shape::Small) {
+                // Square spaces: hours above minutes, each a pair of flaps.
+                let pad = if sh == Shape::Mini { 5.0 } else { 14.0 };
+                let gap = if sh == Shape::Mini { 2.0 } else { 6.0 };
+                let tw = (c.w - 2.0 * pad - gap) / 2.0;
+                let th = ((c.h - 2.0 * pad - gap) / 2.0).min(tw * 1.25);
+                let top = (c.h - 2.0 * th - gap) / 2.0;
+                for (i, d) in digits.iter().enumerate() {
+                    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                    tile(pad + col * (tw + gap), top + row * (th + gap), tw, th, *d);
                 }
-                c.rr(tx, top, tw, th, tw * 0.14, if c.light { (0.15, 0.15, 0.17, 1.0) } else { (0.16, 0.16, 0.19, 1.0) });
-                let fs = (th * 0.62).min(tw * 1.05);
-                c.text(&d.to_string(), tx + tw / 2.0, top + th / 2.0 - fs * 0.68, fs, 600, (0.97, 0.97, 0.98, 1.0), Align::Center, tw, Font::Display);
-                c.line(tx, top + th / 2.0, tx + tw, top + th / 2.0, 1.2, (0.0, 0.0, 0.0, 0.6));
-                tx += tw + gap;
+            } else {
+                let dense = sh == Shape::Dock;
+                let pad = if dense { 6.0 } else { 14.0 };
+                let gap = if dense { 2.0 } else { 5.0 };
+                let mid = if dense { 9.0 } else { 18.0 };
+                let tw = (c.w - 2.0 * pad - 2.0 * gap - mid) / 4.0;
+                let th = (c.h - 2.0 * pad).min(tw * 1.45);
+                let top = (c.h - th) / 2.0;
+                let mut tx = pad;
+                for (i, d) in digits.iter().enumerate() {
+                    if i == 2 {
+                        // The colon between hours and minutes.
+                        let cx = tx - gap + mid / 2.0;
+                        let r = (mid * 0.16).max(1.5);
+                        c.circle(cx, top + th * 0.36, r, c.text2());
+                        c.circle(cx, top + th * 0.64, r, c.text2());
+                        tx += mid - gap;
+                    }
+                    tile(tx, top, tw, th, *d);
+                    tx += tw + if i == 1 { 0.0 } else { gap };
+                }
             }
         }
         ClockKind::World => {
@@ -1378,7 +1438,17 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
     let hourly: Vec<(String, &'static str, String)> = w.hourly.iter().enumerate().map(|(i, (h, t, code))| (if i == 0 { "Now".to_string() } else { format!("{}{}", h12(*h as u32), if *h < 12 { "a" } else { "p" }) }, weather_emoji(*code, (6..19).contains(h)), format!("{:.0}°", d0(*t)))).collect();
     let daily: Vec<Day> = w.daily.iter().enumerate().map(|(i, (d, hi, lo, code))| (if i == 0 { "Today".to_string() } else { weekday_of(d) }, weather_emoji(*code, true), format!("{:.0}°", d0(*hi)), format!("{:.0}°", d0(*lo)))).collect();
     if matches!(sh, Shape::Mini | Shape::Dock) {
-        let s = Sum::new(Vis::Emoji(emoji), temp, if sh == Shape::Dock { w.description.clone() } else { String::new() });
+        let s = if k == WeatherKind::Sun {
+            // The next sunrise or sunset, not the weather.
+            let now_m = (x.now.hour * 60 + x.now.minute) as f32;
+            let (label, hm, e) = if now_m >= mins(&w.sunrise) && now_m < mins(&w.sunset) { ("Sunset", &w.sunset, "🌇") } else { ("Sunrise", &w.sunrise, "🌅") };
+            let m = mins(hm) as u32;
+            let t = format!("{}:{:02}", h12(m / 60), m % 60);
+            let t = if sh == Shape::Dock { format!("{t} {}", ampm(m / 60)) } else { t };
+            Sum::new(Vis::Emoji(e), t, if sh == Shape::Dock { label } else { "" })
+        } else {
+            Sum::new(Vis::Emoji(emoji), temp, if sh == Shape::Dock { w.description.clone() } else { String::new() })
+        };
         compact_sum(c, &s, sh);
         return;
     }
@@ -1398,7 +1468,7 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
                 let items: Vec<(String, &'static str, String)> = if k == WeatherKind::Hourly {
                     hourly.iter().take(3).cloned().collect()
                 } else {
-                    daily.iter().take(3).map(|(l, e, hi, _)| (l.chars().take(3).collect(), *e, hi.clone())).collect()
+                    daily.iter().take(3).map(|(l, e, hi, _)| (if l == "Today" { l.clone() } else { l.chars().take(3).collect() }, *e, hi.clone())).collect()
                 };
                 forecast_cols(c, &items, 6.0, 40.0, c.w - 12.0, false);
             }
@@ -1441,8 +1511,18 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
         WeatherKind::Week if !large => {
             c.tw(city, 16.0, 10.0, 12.0, 600, c.text1(), c.w * 0.5);
             c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 10.0, 11.5, 400, c.text2());
-            let items: Vec<(String, &'static str, String)> = daily.iter().take(7).map(|(l, e, hi, lo)| (l.clone(), *e, format!("{hi} {lo}"))).collect();
-            forecast_cols(c, &items, 12.0, 32.0, c.w - 24.0, true);
+            // Day, icon, then the high bright and the low dimmed, so pairs read apart.
+            let days: Vec<&Day> = daily.iter().take(7).collect();
+            let colw = (c.w - 24.0) / days.len().max(1) as f32;
+            for (i, (l, e, hi, lo)) in days.iter().enumerate() {
+                let cx = 12.0 + colw * (i as f32 + 0.5);
+                c.tc(l, cx, 32.0, 10.5, 500, c.text2(), colw);
+                c.text(e, cx, 47.0, 16.0, 400, c.text1(), Align::Center, colw, Font::Text);
+                let (hw, lw) = (c.measure(hi, 10.5, 600, Font::Text).0, c.measure(lo, 10.0, 400, Font::Text).0);
+                let x0 = cx - (hw + 2.0 + lw) / 2.0;
+                c.tw(hi, x0, 72.0, 10.5, 600, c.text1(), hw + 2.0);
+                c.tw(lo, x0 + hw + 2.0, 72.5, 10.0, 400, c.text3(), lw + 2.0);
+            }
         }
         WeatherKind::Week => {
             c.tw(city, 16.0, 12.0, 12.0, 600, c.text1(), c.w * 0.5);
@@ -1599,13 +1679,14 @@ fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
         }
         Shape::Large => {
             // A big ring with the time inside, buttons under it.
-            let r = ((c.h - 70.0) / 2.0).min(c.w / 2.0 - 30.0);
-            let (cx, cy) = (c.w / 2.0, 12.0 + r);
+            // Card padding (16) above the ring and below the buttons, like the other cards.
+            let r = ((c.h - 92.0) / 2.0).min(c.w / 2.0 - 30.0);
+            let (cx, cy) = (c.w / 2.0, 20.0 + r);
             c.ring(cx, cy, r, 7.0, frac.unwrap_or(0.0), col);
             c.tc(&label, cx, cy - 34.0, 12.0, 600, col, 2.0 * r);
             let fs = fit(c, &text, 34.0, 16.0, 400, Font::Display, 2.0 * r - 24.0);
             c.text(&text, cx, cy - fs * 0.62, fs, 400, c.text1(), Align::Center, 2.0 * r, Font::Display);
-            let by = c.h - 26.0;
+            let by = c.h - 34.0;
             c.circle(cx + 26.0, by, 18.0, col);
             c.glyph(play, cx + 26.0, by, 14.0, WHITE);
             c.circle(cx - 26.0, by, 18.0, c.ink(0.12));
@@ -1618,9 +1699,12 @@ fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
 // ------------------------------------------------------------------ media
 
 #[allow(clippy::too_many_arguments)]
+fn art_src(x: &Ctx, wic: &IWICImagingFactory) -> Option<IWICBitmapSource> {
+    x.hub.art_img.as_ref().map(|a| a.1.clone()).or_else(|| x.control.media.as_ref().and_then(|m| m.thumbnail_png.as_ref()).and_then(|b| load_image_bytes(wic, b)))
+}
+
 fn art(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, ax: f32, ay: f32, s: f32, r: f32) {
-    let src = x.hub.art_img.as_ref().map(|a| a.1.clone()).or_else(|| x.control.media.as_ref().and_then(|m| m.thumbnail_png.as_ref()).and_then(|b| load_image_bytes(wic, b)));
-    match src {
+    match art_src(x, wic) {
         Some(img) => c.image(&img, ax, ay, s, s, r),
         None => {
             c.rr_grad(ax, ay, s, s, r, hex(0xFF5F6D), hex(0xC2185B));
@@ -1699,11 +1783,24 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
         }
         let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
         let (ax, ay) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
-        art(c, x, wic, ax, ay, s, s / 2.0);
-        c.circle(c.w / 2.0, c.h / 2.0, s * 0.1, (0.1, 0.1, 0.12, 1.0));
-        c.circle_stroke(c.w / 2.0, c.h / 2.0, s / 2.0 - 0.5, (1.0, 1.0, 1.0, 0.2), 1.0);
-        if !playing {
-            c.glyph(G_PLAY, c.w / 2.0, c.h / 2.0, s * 0.12, WHITE);
+        let (cx, cy) = (c.w / 2.0, c.h / 2.0);
+        if art_src(x, wic).is_some() {
+            art(c, x, wic, ax, ay, s, s / 2.0);
+        } else {
+            // No cover: a record, with grooves and a coloured label.
+            c.circle(cx, cy, s / 2.0, (0.07, 0.07, 0.08, 1.0));
+            for k in 1..5 {
+                c.circle_stroke(cx, cy, s / 2.0 * (0.48 + k as f32 * 0.11), (1.0, 1.0, 1.0, 0.06), 1.0);
+            }
+            c.rr_grad(cx - s * 0.19, cy - s * 0.19, s * 0.38, s * 0.38, s * 0.19, hex(0xFF5F6D), hex(0xC2185B));
+        }
+        c.circle_stroke(cx, cy, s / 2.0 - 0.5, (1.0, 1.0, 1.0, 0.2), 1.0);
+        if playing {
+            c.circle(cx, cy, (s * 0.05).max(2.0), (0.1, 0.1, 0.12, 1.0));
+        } else {
+            // Paused: a clear play button where the spindle would be.
+            c.circle(cx, cy, s * 0.17, (0.0, 0.0, 0.0, 0.55));
+            c.glyph(G_PLAY, cx + s * 0.01, cy, s * 0.15, WHITE);
         }
         return;
     }
@@ -1929,7 +2026,7 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     let charging = f.extra.get("charging").map(|v| v == "true").unwrap_or(false);
                     let frac = f.frac.unwrap_or(0.0);
                     let col = if frac < 0.2 && !charging { RED } else { GREEN };
-                    let sub = if charging { "Charging".to_string() } else { f.extra.get("time_left").cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| "On battery".into()) };
+                    let sub = if charging { "Charging".to_string() } else { f.extra.get("time_left").filter(|s| !s.is_empty()).map(|t| format!("{t} left")).unwrap_or_else(|| "On battery".into()) };
                     ring_face(c, sh, frac, col, &format!("{:.0}%", frac * 100.0), "Battery", &sub, None);
                 }
                 SysKind::Disk => {
@@ -1946,7 +2043,7 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                         compact_sum(c, &s, sh);
                         return;
                     }
-                    c.num(&format!("{:.1} GB", f.value.unwrap_or(0.0)), 16.0, 14.0, 28.0, 600, c.text1());
+                    c.num(&format!("{:.0} GB", f.value.unwrap_or(0.0)), 16.0, 14.0, 28.0, 600, c.text1());
                     c.tr("Free on C:", c.w - 16.0, 22.0, 12.0, 400, c.text2());
                     c.bar(16.0, 58.0, c.w - 32.0, 8.0, used, if used > 0.9 { RED } else { BLUE });
                     if sh == Shape::Large {
@@ -2169,7 +2266,7 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
             out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Notes));
             let lines: Vec<&str> = x.hub.notes.lines().filter(|l| !l.trim().is_empty()).collect();
             if dense {
-                let s = Sum::new(Vis::Glyph(G_NOTE, YELLOW), if sh == Shape::Mini { String::new() } else { lines.first().copied().unwrap_or("Notes").to_string() }, format!("{} lines", lines.len()));
+                let s = Sum::new(Vis::Glyph(G_NOTE, YELLOW), if sh == Shape::Mini { String::new() } else { lines.first().copied().unwrap_or("Notes").to_string() }, if lines.is_empty() { "Click to write".to_string() } else { format!("{} lines", lines.len()) });
                 compact_sum(c, &s, sh);
                 return;
             }
@@ -2222,8 +2319,12 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
             }
             let (top, bot) = if dense { (6.0, 6.0) } else { (32.0, 22.0) };
             if !dense {
-                c.tw("Day Timeline", 14.0, 10.0, 11.5, 600, c.text2(), 120.0);
-                c.tr(&dur(x.hub.screen.total()), c.w - 14.0, 10.0, 11.5, 500, c.text1());
+                // The total first; the title takes what's left (just "Today" on small cards).
+                let total = dur(x.hub.screen.total());
+                let vw = c.measure(&total, 11.5, 500, Font::Text).0;
+                c.tr(&total, c.w - 14.0, 10.0, 11.5, 500, c.text1());
+                let title = if sh == Shape::Small { "Today" } else { "Day Timeline" };
+                c.tw(title, 14.0, 10.0, 11.5, 600, c.text2(), c.w - 28.0 - vw - 8.0);
             }
             let w = c.w - 28.0;
             let slot = w / 24.0;
@@ -2298,20 +2399,26 @@ fn button_grid(c: &Canvas, out: &mut Painted, items: Vec<(&'static str, &'static
         }
         return;
     }
-    let cols = if sh == Shape::Small { 2 } else { items.len().min(4) };
+    // Small and Large cards: two columns (Large would otherwise stretch four tiles into
+    // tall bars); Medium and the dock: one row.
+    let cols = if matches!(sh, Shape::Small | Shape::Large) { 2 } else { items.len().min(4) };
     let rows = items.len().div_ceil(cols);
     let pad = if dense { 4.0 } else { 10.0 };
     let gap = if dense { 4.0 } else { 8.0 };
     let tw = (c.w - 2.0 * pad - gap * (cols - 1) as f32) / cols as f32;
-    let th = (c.h - 2.0 * pad - gap * (rows - 1) as f32) / rows as f32;
+    // Never taller than a little over square; the grid is centred in what's left.
+    let th = ((c.h - 2.0 * pad - gap * (rows - 1) as f32) / rows as f32).min(tw * 1.15);
+    let top = (c.h - th * rows as f32 - gap * (rows - 1) as f32) / 2.0;
     for (i, (g, label, on, act)) in items.into_iter().enumerate() {
-        let (tx, ty) = (pad + (i % cols) as f32 * (tw + gap), pad + (i / cols) as f32 * (th + gap));
+        let (tx, ty) = (pad + (i % cols) as f32 * (tw + gap), top + (i / cols) as f32 * (th + gap));
         c.rr(tx, ty, tw, th, (th.min(tw) * 0.28).min(16.0), if on { BLUE } else { c.ink(0.08) });
         let ink = if on { WHITE } else { c.text1() };
         if dense || th < 50.0 {
             c.glyph(g, tx + tw / 2.0, ty + th / 2.0, (th.min(tw) * 0.42).min(18.0), ink);
         } else {
             c.glyph(g, tx + tw / 2.0, ty + th * 0.4, 18.0, ink);
+            // A narrow tile gets the first word ("Dark" for "Dark mode") rather than edge-to-edge text.
+            let label = if c.measure(label, 10.5, 500, Font::Text).0 > tw - 12.0 { label.split_whitespace().next().unwrap_or(label) } else { label };
             c.tc(label, tx + tw / 2.0, ty + th * 0.4 + 16.0, 10.5, 500, if on { (1.0, 1.0, 1.0, 0.9) } else { c.text2() }, tw);
         }
         out.hits.push(((tx, ty, tw, th), act));

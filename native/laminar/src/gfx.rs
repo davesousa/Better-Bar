@@ -284,21 +284,47 @@ impl Gfx {
 
     /// A soft drop shadow for a rounded panel, drawn as stacked translucent rounded
     /// rectangles (cheap, smooth). Used as a nine-grid: insets = radius + blur.
-    pub fn shadow_surface(&self, radius: f32, blur: f32, alpha: f32) -> Result<CompositionDrawingSurface> {
-        let size = ((radius + blur) * 2.0 + 4.0).ceil();
+    /// A soft shadow for a rounded rectangle with nothing under the shape itself, for
+    /// glass panels and cards: a filled shadow would show through the translucent glass as
+    /// a darker inner frame. The shape sits `dy` above the shadow (shadows fall downwards).
+    /// Returns the surface and the nine-grid inset to use with it.
+    pub fn hollow_shadow_surface(&self, radius: f32, blur: f32, alpha: f32, dy: f32) -> Result<(CompositionDrawingSurface, f32)> {
+        let pad = dy.max(0.0).ceil() + 2.0;
+        let size = ((radius + blur + pad) * 2.0).ceil();
         let surface = self.surface(size, size)?;
         self.draw(&surface, |dc| unsafe {
-            let steps = (blur.ceil() as i32).max(1);
-            for i in 0..steps {
-                // Outer layers are faint, inner layers stronger: approximates a Gaussian falloff.
-                let k = i as f32 / steps as f32;
-                let inset = blur * k;
-                let a = alpha / steps as f32 * (0.4 + 1.6 * k);
-                let b = dc.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, a.min(1.0)), None)?;
+            Self::shadow_layers(dc, size, radius, blur, alpha);
+            // Clear exactly where the shape covers the shadow, edges anti-aliased.
+            let clear = dc.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, 0.0), None)?;
+            dc.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+            let rr = D2D1_ROUNDED_RECT { rect: rect(blur, blur - dy, size - blur, size - blur - dy), radiusX: radius, radiusY: radius };
+            dc.FillRoundedRectangle(&rr, &clear);
+            dc.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+            Ok(())
+        })?;
+        Ok((surface, radius + blur + pad))
+    }
+
+    unsafe fn shadow_layers(dc: &ID2D1DeviceContext, size: f32, radius: f32, blur: f32, alpha: f32) {
+        let steps = (blur.ceil() as i32).max(1);
+        for i in 0..steps {
+            // Outer layers are faint, inner layers stronger: approximates a Gaussian falloff.
+            let k = i as f32 / steps as f32;
+            let inset = blur * k;
+            let a = alpha / steps as f32 * (0.4 + 1.6 * k);
+            if let Ok(b) = dc.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, a.min(1.0)), None) {
                 let r = radius + blur - inset;
                 let rr = D2D1_ROUNDED_RECT { rect: rect(inset, inset, size - inset, size - inset), radiusX: r, radiusY: r };
                 dc.FillRoundedRectangle(&rr, &b);
             }
+        }
+    }
+
+    pub fn shadow_surface(&self, radius: f32, blur: f32, alpha: f32) -> Result<CompositionDrawingSurface> {
+        let size = ((radius + blur) * 2.0 + 4.0).ceil();
+        let surface = self.surface(size, size)?;
+        self.draw(&surface, |dc| unsafe {
+            Self::shadow_layers(dc, size, radius, blur, alpha);
             Ok(())
         })?;
         Ok(surface)

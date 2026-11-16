@@ -311,6 +311,13 @@ impl<'a> Canvas<'a> {
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe {
             let _ = l.GetMetrics(&mut m);
+            // Light cards: white emoji (clouds, snow, moons) vanish. The glyph drawn without
+            // colour is its silhouette; a faint one just below gives them an edge.
+            if self.light && has_emoji(s) {
+                if let Some(sh) = self.brush((0.0, 0.0, 0.0, 0.16)) {
+                    self.dc.DrawTextLayout(pt(left, y + (size * 0.035).max(0.75)), &l, &sh, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                }
+            }
             if let Some(b) = self.brush(c) {
                 self.dc.DrawTextLayout(pt(left, y), &l, &b, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             }
@@ -400,4 +407,9 @@ pub const fn mono(mark: &'static str, bg: u32, fg: u32) -> Badge {
 }
 pub const fn gly(mark: &'static str, bg: u32, fg: u32) -> Badge {
     Badge { mark, bg: hex(bg), fg: hex(fg), glyph: true }
+}
+
+/// Does the string contain a pictograph (drawn from the colour emoji font)?
+fn has_emoji(s: &str) -> bool {
+    s.chars().any(|ch| matches!(ch as u32, 0x2600..=0x27BF | 0x1F300..=0x1FAFF))
 }

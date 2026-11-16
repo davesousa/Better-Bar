@@ -14,6 +14,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 const CMD_SIZE_BASE: usize = 3900;
 /// Menu command: move a Launchpad widget to the other column.
 const CMD_LPW_OTHER_COL: usize = 3910;
+/// "Change Location…" and the like (a widget's on-this-PC settings), from the dock / Launchpad.
+pub(super) const CMD_WIDGET_LOCAL: usize = 80;
+const CMD_LPW_LOCAL: usize = 81;
 
 fn size_code(s: Size) -> usize {
     match s {
@@ -302,9 +305,16 @@ impl Dock {
     }
 
     pub(super) fn on_widget_replies(&mut self) {
+        // Collect finished jobs first: a place lookup only lands in `geocoded` here.
+        let changed = self.hub.take_replies();
         let geo = self.hub.geocoded.take();
         if let Some((city, res)) = geo {
+            // Only the answer this open form is waiting for (not one from a cancelled or
+            // earlier lookup).
+            let weather_form = self.launchpad.form.as_ref().map(|f| f.conn == "weather" && f.busy.is_some() && f.pending.as_deref() == Some(city.as_str())).unwrap_or(false);
             match res {
+                // The form was cancelled while looking up: leave the location as it was.
+                _ if !weather_form => trace!("weather lookup for {city} ignored (form closed)"),
                 Some((lat, lon, label)) => {
                     trace!("weather location: {label}");
                     let name = label.split(',').next().unwrap_or(&city).trim().to_string();
@@ -314,10 +324,13 @@ impl Dock {
                         c.weather_lon = lon;
                     });
                     self.services.send(Req::Weather(lat, lon));
+                    self.launchpad.form = None;
                 }
                 None => {
                     if let Some(f) = self.launchpad.form.as_mut() {
-                        f.error = Some(format!("Couldn’t find “{city}”. Try another spelling or a nearby city."));
+                        f.busy = None;
+                        f.pending = None;
+                        f.error = Some(format!("Couldn’t find “{city}”. Check the spelling or try a nearby city (an internet connection is needed)."));
                     }
                 }
             }
@@ -325,7 +338,7 @@ impl Dock {
                 self.lp_render("all");
             }
         }
-        if self.hub.take_replies() {
+        if changed {
             self.paint_dock_widgets(true);
             if self.launchpad.open && self.lp_drag.is_none() && !self.launchpad.dragging() {
                 self.lp_render("live");
@@ -513,9 +526,7 @@ impl Dock {
         sp.SetOffset(v3((side - ww) / 2.0, (side - h) / 2.0, 0.0))?;
         g.body.Children()?.InsertAtTop(&sp)?;
         let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
+        let _ = get_cursor_pos(&mut p);
         let half = (side / 2.0) as i32;
         g.popup.show(RECT { left: p.x - half, top: p.y - half, right: p.x + half, bottom: p.y + half }, false);
         Ok(())
@@ -583,6 +594,9 @@ impl Dock {
     /// Save the open connect form: plain settings to config.json, secrets to Credential Manager.
     pub(super) fn save_form(&mut self) {
         let Some(form) = self.launchpad.form.clone() else { return };
+        if form.busy.is_some() {
+            return;
+        }
         let mut missing = Vec::new();
         for f in &form.fields {
             let have = !f.value.trim().is_empty() || (f.secret && f.saved);
@@ -597,12 +611,17 @@ impl Dock {
             self.lp_render("center");
             return;
         }
-        // Weather: look the place up first (on a worker thread); saved when it's found.
+        // Weather: look the place up first (on a worker thread). The form stays open saying
+        // so; it closes when the place is found, or shows why not.
         if form.conn == "weather" {
             let city = form.fields.first().map(|f| f.value.trim().to_string()).unwrap_or_default();
+            if let Some(fm) = self.launchpad.form.as_mut() {
+                fm.error = None;
+                fm.busy = Some(format!("Looking up “{city}”…"));
+                fm.pending = Some(city.clone());
+            }
             self.hub.geocode(city);
-            self.launchpad.form = None;
-            self.lp_render("all");
+            self.lp_render("center");
             return;
         }
         for f in form.fields.iter().filter(|f| f.secret && !f.value.trim().is_empty()) {
@@ -672,6 +691,9 @@ impl Dock {
         if widgets::conns(def).iter().any(|c| laminar_sys::connectors::info(c).map(|i| !i.fields.is_empty()).unwrap_or(false)) {
             items.push(MenuItem::item("Connect…", CMD_LPW_CONNECT));
         }
+        if let Some((_, label)) = widgets::local_form(def) {
+            items.push(MenuItem::item(label, CMD_LPW_LOCAL));
+        }
         if matches!(def.face, Face::Timer(_)) {
             items.push(MenuItem::item("Reset", CMD_LPW_RESET));
         }
@@ -703,9 +725,7 @@ impl Dock {
         self.menu_ctx = None;
         self.menu_open = true;
         let mut pt = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut pt);
-        }
+        let _ = get_cursor_pos(&mut pt);
         let _ = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, items, pt, false, self.scale, self.monitor);
     }
 
@@ -748,6 +768,16 @@ impl Dock {
             CMD_WIDGET_CONNECT => {
                 if let Some(c) = dock_def.and_then(first_conn) {
                     self.open_connect(c);
+                }
+            }
+            CMD_WIDGET_LOCAL => {
+                if let Some((form, _)) = dock_def.and_then(widgets::local_form) {
+                    self.open_connect(form);
+                }
+            }
+            CMD_LPW_LOCAL => {
+                if let Some((form, _)) = lp_def.and_then(widgets::local_form) {
+                    self.open_connect(form);
                 }
             }
             CMD_WIDGET_RESET => {
@@ -817,7 +847,7 @@ impl Dock {
                     self.widget_act(WAct::TimerReset(k), 0.0);
                 }
             }
-            c if (CMD_TIMER_MIN_BASE..CMD_TIMER_MIN_BASE + 1000).contains(&c) => {
+            c if c >= CMD_TIMER_MIN_BASE && TIMER_MINUTES.contains(&(c - CMD_TIMER_MIN_BASE)) => {
                 let mins = (c - CMD_TIMER_MIN_BASE) as u32;
                 if let Some(t) = self.hub.timers.get_mut(&TimerKind::Countdown) {
                     t.reset(mins * 60);
