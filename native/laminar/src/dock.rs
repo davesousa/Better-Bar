@@ -2081,6 +2081,30 @@ impl Dock {
     }
 
     /// Ask GitHub for a newer Laminar (installed copies only).
+    /// Automatic update checks, at the frequency set in Settings → About (default once a
+    /// day; "At startup" checks once per launch). The last check time is saved, so
+    /// restarting Laminar doesn't check again. People on metered connections asked for this.
+    fn auto_update_tick(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static RAN: AtomicBool = AtomicBool::new(false);
+        if !crate::updater::installed() {
+            return;
+        }
+        let first = !RAN.swap(true, Ordering::SeqCst);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let last = self.cfg.last_update_check;
+        let due = crate::updater::check_due(self.cfg.check_updates, self.cfg.update_check_hours, last, now, first);
+
+        if due {
+            self.cfg.last_update_check = now;
+            self.cfg.save();
+            self.check_for_update(false);
+        } else if first {
+            // Not checking now, but a version downloaded earlier still gets its dock icon.
+            crate::updater::show_pending(self.hwnd, WM_APP_UPDATE);
+        }
+    }
+
     fn check_for_update(&mut self, manual: bool) {
         if !crate::updater::installed() {
             if manual {
@@ -3112,6 +3136,10 @@ impl Dock {
             Act::Section(k) => {
                 self.launchpad.query.clear();
                 self.launchpad.settings = Some(k);
+                self.lp_render("all");
+            }
+            Act::Choose(key, v) => {
+                self.save_and_apply(|c| lp::cfg_set(c, key, v as f32));
                 self.lp_render("all");
             }
             Act::Toggle(key) => {
@@ -4244,7 +4272,8 @@ impl Dock {
         if old.start_at_login != self.cfg.start_at_login && self.is_main_dock() {
             crate::updater::set_start_at_login(self.cfg.start_at_login);
         }
-        if !old.check_updates && self.cfg.check_updates && self.is_main_dock() {
+        let turned_on = !old.check_updates && self.cfg.check_updates;
+        if (turned_on || old.update_check_hours != self.cfg.update_check_hours) && self.is_main_dock() {
             unsafe { SetTimer(Some(self.hwnd), T_UPDATE_CHECK, 2000, None) };
         }
         if old.extra_blur != self.cfg.extra_blur {
@@ -4519,11 +4548,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 T_REVEAL => d.on_reveal_timer(),
                 T_TRAY_RAISE => crate::tray::raise(),
                 T_UPDATE_CHECK => unsafe {
-                    // Then every 6 hours.
-                    SetTimer(Some(hwnd), T_UPDATE_CHECK, 6 * 3600 * 1000, None);
-                    if d.cfg.check_updates {
-                        d.check_for_update(false);
-                    }
+                    // Look again every hour (no network; a check runs only when due).
+                    SetTimer(Some(hwnd), T_UPDATE_CHECK, 3600 * 1000, None);
+                    d.auto_update_tick();
                 },
                 T_TRAY_RENDER => unsafe {
                     let _ = KillTimer(Some(hwnd), T_TRAY_RENDER);

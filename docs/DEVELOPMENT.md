@@ -298,6 +298,17 @@ Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
 
+### Update checks: daily by default, with a frequency choice (2026-11-16, released in 0.2.7)
+
+A user on X pointed out that checking GitHub "every few hours" is unkind to metered connections. Dave replied that the default would become once a day, with a frequency option and an on/off switch.
+
+| Before | Now |
+| --- | --- |
+| Checked 20 s after every start, then every 6 hours | Settings → About → **How often to check**: At startup, **Daily** (default) or Weekly. The time of the last automatic check is saved (`last_update_check`), so restarting Laminar doesn't check again. |
+| On/off switch | Unchanged (**Check for updates automatically**); the **Check for updates** button works any time |
+| A version downloaded earlier showed its dock icon after the next check | Shown at start without going online (`updater::show_pending`) |
+
+Checked: builds, all tests pass (new: `update_checks_follow_the_chosen_frequency` covers daily, weekly, at startup, off, and a clock moved back). On screen in a test copy: the three-way control shows under the switch with Daily selected; clicking Weekly highlights it and saves `update_check_hours: 168`. ⚠️ Not checked in an installed copy (the test copy isn't installed, so the timer code is skipped). Possible follow-up: skip automatic checks on metered connections.
 ### Start at sign-in only when the user turns it on (2026-11-16, released in 0.2.6)
 
 Avira's behaviour check flagged the installed `laminar.exe` as `Drop.Win64.Startup.3410` (2:46 PM, first launch after a reinstall): on launch the dock had created its own Startup shortcut, and an unsigned program adding itself to Startup on first run is what malware droppers do. The dock never creates that shortcut on its own now.

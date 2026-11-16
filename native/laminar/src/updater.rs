@@ -143,6 +143,30 @@ pub fn check(hwnd: HWND, msg: u32) {
     });
 }
 
+/// Is an automatic update check due? `hours` 0 = once per launch (`first` tick of this
+/// run), otherwise when at least that many hours have passed since `last` (Unix seconds).
+/// A `last` in the future (the clock was moved back) counts as due.
+pub fn check_due(enabled: bool, hours: u32, last: u64, now: u64, first: bool) -> bool {
+    enabled
+        && match hours {
+            0 => first,
+            h => last > now || now - last >= h as u64 * 3600,
+        }
+}
+/// Offline: if a version was downloaded earlier and not installed yet, mark it ready and
+/// post `msg` so the dock shows its update icon (used when no check is due this time).
+pub fn show_pending(hwnd: HWND, msg: u32) {
+    let Some(m) = manager() else { return };
+    if let Some(asset) = m.get_update_pending_restart() {
+        let v = asset.Version.clone();
+        *READY.lock().unwrap() = Some(asset);
+        set_status(Status::Ready(v));
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Start Velopack's updater for the downloaded version. It waits for this process to exit,
 /// installs, and starts the new version. The caller then shuts the dock down cleanly.
 pub fn begin_install() -> Result<(), String> {
@@ -257,6 +281,26 @@ fn quit_running_dock() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_checks_follow_the_chosen_frequency() {
+        use super::check_due;
+        let day = 24 * 3600;
+        let now = 1_800_000_000;
+        // Daily: not again within a day (a restart doesn't check), yes after a day.
+        assert!(!check_due(true, 24, now - 3600, now, true));
+        assert!(check_due(true, 24, now - day, now, false));
+        assert!(check_due(true, 24, 0, now, true), "never checked before");
+        // Weekly.
+        assert!(!check_due(true, 168, now - 6 * day, now, false));
+        assert!(check_due(true, 168, now - 7 * day, now, false));
+        // At startup: once per launch, whatever the time.
+        assert!(check_due(true, 0, now, now, true));
+        assert!(!check_due(true, 0, now - 30 * day, now, false));
+        // Turned off: never.
+        assert!(!check_due(false, 24, 0, now, true));
+        // Clock moved back: check rather than wait for the old time.
+        assert!(check_due(true, 24, now + day, now, false));
+    }
     #[test]
     fn startup_shortcut_is_created() {
         let dir = std::env::temp_dir().join("laminar-startup-test");

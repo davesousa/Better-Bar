@@ -98,6 +98,11 @@ pub struct Config {
     pub start_at_login: bool,
     /// Check GitHub for new versions and download them quietly.
     pub check_updates: bool,
+    /// How often the automatic check runs, in hours: 0 = only when Laminar starts,
+    /// 24 = once a day (default), 168 = once a week.
+    pub update_check_hours: u32,
+    /// Unix time (seconds) of the last automatic check, so restarts don't check again.
+    pub last_update_check: u64,
     /// Unix time (seconds) before which the update icon stays hidden ("Remind me later").
     pub update_snooze_until: u64,
     /// A version the user chose to skip.
@@ -164,6 +169,8 @@ impl Default for Config {
             // Off until the user turns it on (see updater::sync_start_at_login).
             start_at_login: false,
             check_updates: true,
+            update_check_hours: 24,
+            last_update_check: 0,
             update_snooze_until: 0,
             update_skip: String::new(),
             auto_hide: false,

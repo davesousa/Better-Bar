@@ -137,7 +137,7 @@ Laminar follows Windows' light/dark mode as it changes. Icon size, magnification
 2. Run it. It installs for your user only (no admin needed), starts Laminar, and hides the Windows taskbar.
 3. Press the **Windows key** to open Launchpad, or right-click the dock for settings.
 
-Updates install themselves: Laminar checks GitHub every few hours, downloads quietly, and shows a small green tile in the dock. Nothing installs until you click **Restart and Update**.
+Updates install themselves: Laminar checks GitHub once a day (or only at startup, or weekly; choose in Settings → About, or turn automatic checks off), downloads quietly, and shows a small green tile in the dock. Nothing installs until you click **Restart and Update**.
 
 > [!NOTE]
 > **"Windows protected your PC"?** The installer isn't code-signed yet, so SmartScreen warns about it. Click **More info → Run anyway**. One antivirus product (Avira) has flagged an earlier version as a false positive. The full source is here and every release is built by [GitHub Actions](.github/workflows/release.yml) from this repository, so you can check exactly what you're running.

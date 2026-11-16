@@ -63,6 +63,8 @@ pub enum Act {
     MediaNext,
     Toggle(&'static str),
     Slider(&'static str),
+    /// Pick one option of a setting (key, value).
+    Choose(&'static str, u32),
     OpenConfig,
     /// Check GitHub for a newer Laminar now.
     CheckUpdates,
@@ -119,6 +121,8 @@ struct Hit {
 enum Ctl {
     Toggle,
     Slider { min: f32, max: f32, step: f32, unit: &'static str },
+    /// A row of options (label, value); the one matching the setting is highlighted.
+    Choice(&'static [(&'static str, u32)]),
 }
 
 struct Row {
@@ -172,6 +176,7 @@ fn section_rows(i: usize) -> Vec<Row> {
         3 => vec![
             r("start_at_login", "Start Laminar when you sign in", "Off until you turn it on. Installed copies only.", Toggle),
             r("check_updates", "Check for updates automatically", "New versions download quietly; an icon in the dock offers to install them.", Toggle),
+            r("update_check_hours", "How often to check", "Daily by default. Check for updates (above) works any time.", Choice(&[("At startup", 0), ("Daily", 24), ("Weekly", 168)])),
         ],
         _ => vec![],
     }
@@ -202,6 +207,7 @@ pub fn cfg_get(c: &Config, key: &str) -> f32 {
         "per_display_windows" => b(c.per_display_windows),
         "start_at_login" => b(c.start_at_login),
         "check_updates" => b(c.check_updates),
+        "update_check_hours" => c.update_check_hours as f32,
         "panel_shadow" => c.panel_shadow,
         "card_shadow" => c.card_shadow,
         "show_background_apps" => b(c.show_background_apps),
@@ -231,6 +237,7 @@ pub fn cfg_set(c: &mut Config, key: &str, v: f32) {
         "click_to_minimize" => c.click_to_minimize = v > 0.5,
         "start_at_login" => c.start_at_login = v > 0.5,
         "check_updates" => c.check_updates = v > 0.5,
+        "update_check_hours" => c.update_check_hours = v.max(0.0) as u32,
         "win_key_launchpad" => c.win_key_launchpad = v > 0.5,
         "hide_windows_taskbar" => c.hide_windows_taskbar = v > 0.5,
         "show_on_all_displays" => c.show_on_all_displays = v > 0.5,
@@ -872,6 +879,24 @@ impl Launchpad {
                     };
                     Self::txt(c, gfx, content, &val, TextStyle { px: 12.0 * s, color: theme::text_2(), ..Default::default() }, x + tw2 + 14.0 * s, yy - 9.0 * s)?;
                     self.hit(PanelId::Center, (ox + x - 10.0 * s, oy + yy - 14.0 * s, tw2 + 20.0 * s, 28.0 * s), Act::Slider(row.key), 8.0 * s, false, scroll);
+                }
+                Ctl::Choice(options) => {
+                    // A segmented control, right-aligned like the switches.
+                    let (segw, sh) = (86.0 * s, 28.0 * s);
+                    let total = segw * options.len() as f32;
+                    let x0 = pad + row_w - 16.0 * s - total;
+                    let yy = ry + (56.0 * s - sh) / 2.0;
+                    Self::rect(c, content, x0, yy, total, sh, 8.0 * s, theme::ink(0.14))?;
+                    for (i, (label, value)) in options.iter().enumerate() {
+                        let sx = x0 + i as f32 * segw;
+                        let on = (v - *value as f32).abs() < 0.5;
+                        if on {
+                            Self::rect(c, content, sx + 2.0 * s, yy + 2.0 * s, segw - 4.0 * s, sh - 4.0 * s, 6.0 * s, theme::accent())?;
+                        }
+                        let color = if on { (1.0, 1.0, 1.0, 1.0) } else { theme::text() };
+                        Self::txt(c, gfx, content, label, TextStyle { px: 12.0 * s, weight: if on { 600 } else { 400 }, color, center: true, max_w: Some(segw), ..Default::default() }, sx, yy + 6.0 * s)?;
+                        self.hit(PanelId::Center, (ox + sx, oy + yy, segw, sh), Act::Choose(row.key, *value), 6.0 * s, false, scroll);
+                    }
                 }
             }
         }
