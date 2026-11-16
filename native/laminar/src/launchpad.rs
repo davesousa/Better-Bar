@@ -88,6 +88,20 @@ pub enum Act {
     FormSave,
     FormCancel,
     FormDisconnect,
+    /// Copy text (a calculator answer) and close.
+    Copy(String),
+    /// Switch to an open window.
+    Window(isize),
+    /// Set the volume (percent).
+    SetVolume(u8),
+    /// Run a program or open a link, with arguments (settings and Control Panel tasks).
+    Run(String, String),
+    /// A system command (sleep, restart, empty the Recycle Bin…).
+    Sys(SysCmd),
+    /// First press on a command that asks again before it runs.
+    Arm(SysCmd),
+    /// Forget what the user picked in search.
+    ClearHistory,
 }
 
 #[derive(Clone)]
@@ -100,16 +114,6 @@ struct Hit {
     scroll: bool,
     /// In a widget column's scrolling list (0 left, 1 right).
     col: Option<usize>,
-}
-
-/// A search result row.
-#[derive(Clone)]
-enum ResultItem {
-    App(String, String),
-    File(FileHit),
-    Setting(&'static str, &'static str),
-    Laminar(&'static str, usize),
-    Web(String),
 }
 
 enum Ctl {
@@ -297,6 +301,10 @@ pub struct Data<'a> {
     /// Laminar's version and its update status, for Settings → About.
     pub app_version: &'a str,
     pub app_update: &'a str,
+    /// Open windows, for "switch to" results.
+    pub windows: &'a [WinRow],
+    /// What the user picked in search before.
+    pub history: &'a laminar_sys::history::History,
 }
 
 /// A tray icon as Launchpad shows it.
@@ -329,8 +337,12 @@ pub struct Launchpad {
     hover_shape: Option<(ShapeVisual, CompositionRoundedRectangleGeometry)>,
     pub query: String,
     pub results_len: usize,
-    results: Vec<ResultItem>,
+    results: Vec<launchpad_search::Row>,
     pub sel: usize,
+    /// A command waiting for its second Enter (restart, shut down, sign out).
+    pub armed: Option<SysCmd>,
+    /// When it was armed: a confirm sooner than a double-click apart is ignored.
+    pub armed_at: std::time::Instant,
     pub all_open: bool,
     /// Some(section) while the centre panel shows Settings.
     pub settings: Option<usize>,
@@ -380,6 +392,8 @@ impl Launchpad {
             results_len: 0,
             results: Vec::new(),
             sel: 0,
+            armed: None,
+            armed_at: std::time::Instant::now(),
             all_open: false,
             settings: None,
             dragging: None,
@@ -411,6 +425,7 @@ impl Launchpad {
         self.size = (w, h);
         self.query.clear();
         self.sel = 0;
+        self.armed = None;
         self.scroll_y = 0.0;
         self.settings = None;
         self.gallery = None;
@@ -481,6 +496,7 @@ impl Launchpad {
     pub fn hide(&mut self) {
         if self.open {
             self.open = false;
+            self.armed = None;
             self.dragging = None;
             self.form = None;
             self.gallery = None;
@@ -605,7 +621,7 @@ impl Launchpad {
         Self::glyph(c, gfx, &content, G_SEARCH, 16.0 * s, theme::text_2(), fx + 24.0 * s, fy + fh / 2.0)?;
         let tx = fx + 44.0 * s;
         let (qw, qh) = if self.query.is_empty() {
-            let (_, h) = Self::txt(c, gfx, &content, "Search apps, files and settings", TextStyle { px: 16.0 * s, color: theme::text_3(), ..Default::default() }, tx, fy + (fh - 22.0 * s) / 2.0)?;
+            let (_, h) = Self::txt(c, gfx, &content, "Search apps, settings, files, or calculate", TextStyle { px: 16.0 * s, color: theme::text_3(), ..Default::default() }, tx, fy + (fh - 22.0 * s) / 2.0)?;
             (0.0, h)
         } else {
             Self::txt(c, gfx, &content, &self.query, TextStyle { px: 16.0 * s, max_w: Some(fw - 80.0 * s), ..Default::default() }, tx, fy + (fh - 22.0 * s) / 2.0)?
@@ -736,119 +752,6 @@ impl Launchpad {
             if k % cols != 0 {
                 y += row_h;
             }
-        }
-        Ok(y)
-    }
-
-    /// Recompute search results for the current query (apps ranked by fuzzy match).
-    pub fn update_results(&mut self, d: &Data) {
-        let q = self.query.trim().to_string();
-        let mut out = Vec::new();
-        if q.is_empty() {
-            self.results.clear();
-            self.results_len = 0;
-            return;
-        }
-        // Fuzzy rank, then prefer apps where a whole word matches ("code" → Visual Studio
-        // Code before "Codec …") and apps the user has pinned.
-        let ql = q.to_lowercase();
-        let mut ranked = laminar_sys::search::rank(&q, d.apps, 40);
-        for r in ranked.iter_mut() {
-            let name = r.0.name.to_lowercase();
-            if name.split(|ch: char| !ch.is_alphanumeric()).any(|w| w == ql) {
-                r.1 += 1500;
-            }
-            // Pinned apps win ties, but only for genuine matches (substring or better).
-            if d.pinned.contains(&r.0.id) && r.1 > 500 {
-                r.1 += 700;
-            }
-        }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
-        for (a, _) in ranked.into_iter().take(8) {
-            out.push(ResultItem::App(a.id.clone(), a.name.clone()));
-        }
-        let mut sets: Vec<(i32, ResultItem)> = Vec::new();
-        for (name, uri) in WIN_SETTINGS {
-            if let Some(sc) = laminar_sys::search::fuzzy_score(&q, name) {
-                sets.push((sc, ResultItem::Setting(name, uri)));
-            }
-        }
-        for (name, sec) in LAMINAR_SETTINGS {
-            if let Some(sc) = laminar_sys::search::fuzzy_score(&q, &name["Laminar: ".len()..]).or_else(|| laminar_sys::search::fuzzy_score(&q, name)) {
-                sets.push((sc, ResultItem::Laminar(name, *sec)));
-            }
-        }
-        sets.sort_by(|a, b| b.0.cmp(&a.0));
-        // Only reasonably strong settings matches.
-        // Settings need a substring or word match (score > 500), not a loose letter sequence.
-        let strong: Vec<ResultItem> = sets.into_iter().filter(|(sc, _)| *sc > 500).take(4).map(|(_, r)| r).collect();
-        for f in d.files.iter().take(5) {
-            out.push(ResultItem::File(f.clone()));
-        }
-        out.extend(strong);
-        out.push(ResultItem::Web(q));
-        self.results_len = out.len();
-        self.sel = self.sel.min(out.len().saturating_sub(1));
-        self.results = out;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_results(&mut self, c: &Compositor, gfx: &Gfx, d: &Data, inner: &ContainerVisual, ox: f32, oy: f32, pw: f32, mut y: f32) -> Result<f32> {
-        let s = self.scale;
-        let pad = 22.0 * s;
-        let row_w = pw - 2.0 * pad;
-        let mut last_section = "";
-        let results = self.results.clone();
-        for (i, r) in results.iter().enumerate() {
-            let section = match r {
-                _ if i == 0 => "Top Hit",
-                ResultItem::App(..) => "Apps",
-                ResultItem::File(_) => "Files",
-                ResultItem::Setting(..) | ResultItem::Laminar(..) => "Settings",
-                ResultItem::Web(_) => "Web",
-            };
-            if section != last_section {
-                Self::txt(c, gfx, inner, section, TextStyle { px: 12.0 * s, weight: 600, color: theme::text_3(), ..Default::default() }, pad + 10.0 * s, y + 6.0 * s)?;
-                y += 28.0 * s;
-                last_section = section;
-            }
-            let top = i == 0;
-            let rh = if top { 64.0 * s } else { 46.0 * s };
-            let isz = if top { 44.0 * s } else { 30.0 * s };
-            let (title, sub, act) = match r {
-                ResultItem::App(id, name) => {
-                    Self::icon(c, inner, d.brushes.get(id), pad + 10.0 * s, y + (rh - isz) / 2.0, isz)?;
-                    (name.clone(), "Application".to_string(), Act::App(id.clone()))
-                }
-                ResultItem::File(f) => {
-                    Self::glyph(c, gfx, inner, if f.is_folder { G_FOLDER } else { G_DOC }, if top { 26.0 } else { 18.0 } * s, theme::text_2(), pad + 10.0 * s + isz / 2.0, y + rh / 2.0)?;
-                    let folder = std::path::Path::new(&f.path).parent().map(|p| p.display().to_string()).unwrap_or_default();
-                    (f.name.clone(), folder, Act::File(f.path.clone()))
-                }
-                ResultItem::Setting(name, uri) => {
-                    Self::glyph(c, gfx, inner, G_SETTINGS, if top { 24.0 } else { 17.0 } * s, theme::text_2(), pad + 10.0 * s + isz / 2.0, y + rh / 2.0)?;
-                    (name.to_string(), "Windows Settings".to_string(), Act::Uri(uri.to_string()))
-                }
-                ResultItem::Laminar(name, sec) => {
-                    Self::glyph(c, gfx, inner, G_SETTINGS, if top { 24.0 } else { 17.0 } * s, (0.55, 0.6, 1.0, 1.0), pad + 10.0 * s + isz / 2.0, y + rh / 2.0)?;
-                    (name.to_string(), "Laminar Settings".to_string(), Act::Section(*sec))
-                }
-                ResultItem::Web(q) => {
-                    Self::glyph(c, gfx, inner, G_GLOBE, if top { 24.0 } else { 17.0 } * s, theme::text_2(), pad + 10.0 * s + isz / 2.0, y + rh / 2.0)?;
-                    (format!("Search the web for \u{201c}{q}\u{201d}"), "Opens your browser".to_string(), Act::Web(q.clone()))
-                }
-            };
-            let tx = pad + 22.0 * s + isz;
-            Self::txt(c, gfx, inner, &title, TextStyle { px: if top { 17.0 } else { 13.5 } * s, weight: if top { 600 } else { 500 }, max_w: Some(row_w - isz - 60.0 * s), ..Default::default() }, tx, y + rh / 2.0 - if top { 22.0 } else { 17.0 } * s)?;
-            Self::txt(c, gfx, inner, &sub, TextStyle { px: 11.5 * s, color: theme::text_2(), max_w: Some(row_w - isz - 60.0 * s), ..Default::default() }, tx, y + rh / 2.0 + 1.0 * s)?;
-            if i == self.sel {
-                // A fresh highlight each render (a visual can only have one parent).
-                let (ss, _, _) = ui::rounded(c, row_w, rh - 2.0 * s, 10.0 * s, rgba(10, 132, 255, 0.85))?;
-                ss.SetOffset(v3(pad, y, 0.0))?;
-                inner.Children()?.InsertAtBottom(&ss)?;
-            }
-            self.hit(PanelId::Center, (ox + pad, oy + y, row_w, rh - 2.0 * s), act, 10.0 * s, true, true);
-            y += rh;
         }
         Ok(y)
     }
@@ -1216,6 +1119,7 @@ impl Launchpad {
         self.gallery = None;
         self.query.push(ch);
         self.sel = 0;
+        self.armed = None;
         self.scroll_y = 0.0;
         true
     }
@@ -1232,6 +1136,7 @@ impl Launchpad {
                 self.query.pop();
             }
             self.sel = 0;
+            self.armed = None;
             return true;
         }
         if vk == VK_DOWN.0 && self.results_len > 0 {
@@ -1247,6 +1152,11 @@ fn short_name(id: &str) -> String {
     let base = id.rsplit(['\\', '!']).next().unwrap_or(id);
     base.trim_end_matches(".exe").to_string()
 }
+
+// Search results.
+#[path = "launchpad_search.rs"]
+mod launchpad_search;
+pub use launchpad_search::{SysCmd, WinRow};
 
 // Widget column, gallery and connect form.
 #[path = "launchpad_widgets.rs"]

@@ -499,6 +499,8 @@ struct Dock {
     stats: Option<Stats>,
     weather: Option<Weather>,
     files: Vec<FileHit>,
+    /// What the user picked in Launchpad search (search-history.json next to config.json).
+    history: laminar_sys::history::History,
     files_gen: u64,
     icons_requested: std::collections::HashSet<String>,
     user_name: String,
@@ -2551,8 +2553,13 @@ impl Dock {
                             self.close_launchpad();
                         }
                     } else if vk == VK_RETURN.0 {
-                        if let Some(a) = self.launchpad.selected_act() {
-                            self.lp_act(a);
+                        // Holding Enter must not repeat it (a first press arms Restart; a
+                        // repeat would confirm it).
+                        let repeat = (lp.0 >> 30) & 1 == 1;
+                        if !repeat {
+                            if let Some(a) = self.launchpad.selected_act() {
+                                self.lp_act(a);
+                            }
                         }
                     } else if self.launchpad.key_down(vk) {
                         self.lp_query_changed();
@@ -2824,6 +2831,7 @@ impl Dock {
         let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
+        let lp_wins = self.lp_windows();
         let data = lp::Data {
             apps: &self.lp_apps,
             brushes: &self.brushes,
@@ -2843,6 +2851,8 @@ impl Dock {
             app_update: &app_update,
             hub: &self.hub,
             whatsapp: wa,
+            windows: &lp_wins,
+            history: &self.history,
         };
         self.launchpad.update_results(&data);
         let (c, gfx) = (self.compositor.clone(), &self.gfx);
@@ -2916,9 +2926,11 @@ impl Dock {
         if self.launchpad.query.is_empty() {
             return;
         }
-        for (a, _) in laminar_sys::search::rank(&self.launchpad.query, &self.lp_apps, 8) {
+        // Learning can lift an app from further down, so fetch icons for more than are shown.
+        for (a, _) in laminar_sys::search::rank(&self.launchpad.query, &self.lp_apps, 40) {
             need.push(a.id.clone());
         }
+        need.extend(self.launchpad.result_app_ids());
     }
 
     fn toggle_launchpad(&mut self) {
@@ -2957,6 +2969,7 @@ impl Dock {
         let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
+        let lp_wins = self.lp_windows();
         let data = lp::Data {
             apps: &self.lp_apps,
             brushes: &self.brushes,
@@ -2976,6 +2989,8 @@ impl Dock {
             app_update: &app_update,
             hub: &self.hub,
             whatsapp: wa,
+            windows: &lp_wins,
+            history: &self.history,
         };
         let (c, gfx, bd) = (self.compositor.clone(), &self.gfx, self.backdrop.clone());
         if let Err(e) = self.launchpad.show(&c, gfx, &bd, self.monitor, reserve, self.scale, &data) {
@@ -3051,6 +3066,14 @@ impl Dock {
 
     fn lp_act(&mut self, act: Act) {
         trace!("launchpad action {act:?}");
+        // Search learns what was picked for what was typed (not for a first "arm" press).
+        if !matches!(act, Act::Arm(_) | Act::ClearHistory) {
+            if let Some(key) = self.launchpad.result_key(&act) {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                self.history.record(&self.launchpad.query, &key, now);
+                save_history(&self.history);
+            }
+        }
         match act {
             Act::Close => self.close_launchpad(),
             Act::App(id) => {
@@ -3199,7 +3222,67 @@ impl Dock {
                 self.lp_render("center");
             }
             Act::FormDisconnect => self.disconnect_form(),
+            Act::Copy(text) => {
+                set_clipboard_text(self.hwnd, &text);
+                self.close_launchpad();
+            }
+            Act::Window(h) => {
+                self.close_launchpad();
+                tracker::activate(HWND(h as _));
+            }
+            Act::SetVolume(v) => {
+                let f = v as f32 / 100.0;
+                self.control.volume = Some(f);
+                if v > 0 && self.control.muted == Some(true) {
+                    self.control.muted = Some(false);
+                    self.services.send(Req::SetMuted(false));
+                }
+                self.services.send(Req::SetVolume(f));
+                self.lp_render("all");
+            }
+            Act::Run(target, args) => {
+                self.close_launchpad();
+                apps::run(&target, &args);
+            }
+            Act::Arm(cmd) => {
+                self.launchpad.armed = Some(cmd);
+                self.launchpad.armed_at = Instant::now();
+                self.lp_render("center");
+            }
+            Act::Sys(cmd) => {
+                use crate::launchpad::SysCmd;
+                if cmd != SysCmd::EmptyBin {
+                    // Only a deliberate second press confirms: not a double-click or a
+                    // bounce, and only for the command that was armed.
+                    let gap = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }.max(300) as u128;
+                    if self.launchpad.armed != Some(cmd) || self.launchpad.armed_at.elapsed().as_millis() < gap {
+                        return;
+                    }
+                }
+                self.launchpad.armed = None;
+                self.close_launchpad();
+                match cmd {
+                    SysCmd::Sleep => self.services.send(Req::Power(services::Power::Sleep)),
+                    SysCmd::SignOut => self.services.send(Req::Power(services::Power::SignOut)),
+                    SysCmd::Restart => self.services.send(Req::Power(services::Power::Restart)),
+                    SysCmd::ShutDown => self.services.send(Req::Power(services::Power::ShutDown)),
+                    SysCmd::EmptyBin => apps::empty_recycle_bin(),
+                }
+            }
+            Act::ClearHistory => {
+                self.history.clear();
+                save_history(&self.history);
+                self.lp_render("center");
+            }
         }
+    }
+
+    /// Open windows for Launchpad's "switch to" results.
+    fn lp_windows(&self) -> Vec<lp::WinRow> {
+        if self.launchpad.query.trim().is_empty() {
+            return Vec::new();
+        }
+        self.windows.iter().map(|w| lp::WinRow { hwnd: w.hwnd.0 as isize, title: w.title.clone(), app: w.app.clone() }).collect()
     }
 
     fn on_service_replies(&mut self) {
@@ -4642,6 +4725,49 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
+/// Put text on the clipboard (owned by `owner`, as Windows requires for SetClipboardData).
+fn set_clipboard_text(owner: HWND, text: &str) {
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if OpenClipboard(Some(owner)).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        if let Ok(g) = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2) {
+            let p = GlobalLock(g) as *mut u16;
+            let mut given = false;
+            if !p.is_null() {
+                std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+                let _ = GlobalUnlock(g);
+                // On success the clipboard owns the memory.
+                given = SetClipboardData(CF_UNICODETEXT, Some(windows::Win32::Foundation::HANDLE(g.0))).is_ok();
+            }
+            if !given {
+                let _ = GlobalFree(Some(g));
+            }
+        }
+        let _ = CloseClipboard();
+    }
+}
+
+fn history_path() -> std::path::PathBuf {
+    config::dir().join("search-history.json")
+}
+
+fn load_history() -> laminar_sys::history::History {
+    std::fs::read_to_string(history_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_history(h: &laminar_sys::history::History) {
+    if let Ok(t) = serde_json::to_string(h) {
+        let _ = std::fs::write(history_path(), t);
+    }
+}
+
 /// Text on the clipboard, if any.
 fn clipboard_text() -> Option<String> {
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
@@ -4844,6 +4970,7 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             stats: None,
             weather: None,
             files: Vec::new(),
+            history: load_history(),
             files_gen: 0,
             icons_requested: std::collections::HashSet::new(),
             user_name: user_name(),

@@ -136,6 +136,54 @@ fn subsequence(q: &[char], t: &[char], starts: &[bool]) -> Option<i32> {
     Some(best - ((n - m) as i32) / 4)
 }
 
+/// True when `query` appears in `text` as whole words ("dark" in "Colors & dark mode",
+/// not in "darker"); case-insensitive.
+pub fn whole_word(query: &str, text: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    let t = text.to_lowercase();
+    let mut from = 0;
+    while let Some(i) = t[from..].find(&q) {
+        let s = from + i;
+        let e = s + q.len();
+        let before = t[..s].chars().next_back().map(|c| !c.is_alphanumeric()).unwrap_or(true);
+        let after = t[e..].chars().next().map(|c| !c.is_alphanumeric()).unwrap_or(true);
+        if before && after {
+            return true;
+        }
+        from = s + t[s..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+    }
+    false
+}
+
+/// Score for something with a name and synonyms (a setting, a command). Stricter than
+/// [`fuzzy_score`]: the name must contain the query (substring or better), or a synonym must
+/// start with it or have a word that does. A whole-word hit in the name adds 1500, like apps;
+/// a synonym equal to the query scores 3400 (above a plain name prefix, below a whole word).
+pub fn score_named(query: &str, name: &str, keywords: &[String]) -> Option<i32> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    let named = |n: &str| fuzzy_score(&q, n).filter(|&s| s > 500).map(|s| s + if whole_word(&q, n) { 1500 } else { 0 });
+    let mut best = named(name);
+    // "wifi" finds "Wi-Fi settings", "email" finds "E-mail".
+    if name.contains('-') && !q.contains('-') {
+        best = best.max(named(&name.replace('-', "")));
+    }
+    for kw in keywords {
+        let s = if *kw == q {
+            Some(3400)
+        } else {
+            fuzzy_score(&q, kw).filter(|&s| s > 1000).map(|s| s - 300 + if whole_word(&q, kw) { 600 } else { 0 })
+        };
+        best = best.max(s);
+    }
+    best
+}
+
 /// Scores every item's `name` against `query` and returns the best `limit` matches,
 /// highest score first (ties: alphabetical). An empty query returns the first `limit`
 /// items in their original order with score 0.
@@ -154,6 +202,26 @@ mod tests {
 
     fn s(q: &str, t: &str) -> i32 {
         fuzzy_score(q, t).unwrap_or(-1)
+    }
+
+    #[test]
+    fn whole_words() {
+        assert!(whole_word("dark", "Colors & dark mode"));
+        assert!(whole_word("dark mode", "Colors & Dark Mode"));
+        assert!(!whole_word("dark", "Darker"));
+        assert!(!whole_word("", "x"));
+    }
+
+    #[test]
+    fn named_items_use_synonyms() {
+        let kw = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let night = kw(&["blue light reduction", "night light settings"]);
+        assert!(score_named("blue light", "Night light", &night).is_some());
+        assert!(score_named("nl", "Night light", &night).is_none(), "no loose letter matches");
+        assert_eq!(score_named("vpn", "Allow tunnels", &kw(&["vpn"])), Some(3400));
+        let page = score_named("vpn", "VPN settings", &[]).unwrap();
+        assert!(page > 3400, "whole word in the name beats a synonym: {page}");
+        assert!(score_named("env", "Edit environment variables", &[]).is_some());
     }
 
     #[test]

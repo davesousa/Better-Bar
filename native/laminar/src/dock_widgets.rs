@@ -410,6 +410,7 @@ impl Dock {
         let wa = self.whatsapp_state();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
+        let lp_wins = self.lp_windows();
         let data = lp::Data {
             apps: &self.lp_apps,
             brushes: &self.brushes,
@@ -429,6 +430,8 @@ impl Dock {
             app_update: &app_update,
             hub: &self.hub,
             whatsapp: wa,
+            windows: &lp_wins,
+            history: &self.history,
         };
         let c = self.compositor.clone();
         if let Err(e) = self.launchpad.begin_drag(&c, &self.gfx, &data, src, x, y) {

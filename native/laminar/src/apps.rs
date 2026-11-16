@@ -62,6 +62,28 @@ pub fn launch(id: &str) {
     });
 }
 
+/// Run a program with arguments, or open a link (`ms-settings:…`, `shell:…`); used for
+/// Windows settings and Control Panel tasks.
+pub fn run(target: &str, args: &str) {
+    let (t, a) = (target.to_string(), args.to_string());
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let ha = HSTRING::from(a.as_str());
+        let params = if a.is_empty() { PCWSTR::null() } else { PCWSTR(ha.as_ptr()) };
+        ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(t), params, PCWSTR::null(), SW_SHOWNORMAL);
+        CoUninitialize();
+    });
+}
+
+/// Empty the Recycle Bin; Windows asks first and shows progress.
+pub fn empty_recycle_bin() {
+    std::thread::spawn(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = windows::Win32::UI::Shell::SHEmptyRecycleBinW(None, PCWSTR::null(), 0);
+        CoUninitialize();
+    });
+}
+
 /// Start an app elevated (Windows shows the UAC prompt).
 pub fn launch_as_admin(id: &str) {
     let target = parsing_name(id);

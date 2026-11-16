@@ -85,6 +85,8 @@ pub struct Services {
 
 impl Services {
     pub fn start(notify: HWND) -> Self {
+        // Windows' settings index for search: built (or read from its cache) in the background.
+        laminar_sys::settings_index::warm();
         let (tx, rx) = channel::<Req>();
         let replies = Arc::new(Mutex::new(Vec::new()));
         let out = replies.clone();

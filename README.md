@@ -213,7 +213,8 @@ Decision (Dave, 2026-11-11): use [Velopack](https://docs.velopack.io/) with upda
 | Update icon | A green download tile appears before the Recycle Bin. Click: **Restart and Update**, **What's New** (the release page), **Remind Me Tomorrow**, **Remind Me Next Week**, **Skip This Version**. Nothing installs until Restart and Update. |
 | Installing an update | Laminar starts Velopack's updater, quits cleanly (Windows' taskbar comes back), the updater swaps the files and starts the new version. |
 | Uninstall | Windows Settings → Apps. Laminar's uninstall step quits the running dock (restoring the taskbar) and removes the Startup shortcut. |
-| Developer builds | A copy not installed by Setup.exe (like `targetelease`) shows "developer build", never checks for updates and never touches the Startup shortcut. |
+| Developer builds | A copy not installed by Setup.exe (like `target
+elease`) shows "developer build", never checks for updates and never touches the Startup shortcut. |
 | Releasing | Set `version` in `native/laminar/Cargo.toml`, commit, push a matching tag (`git tag v0.1.1`, `git push origin v0.1.1`). `.github/workflows/release.yml` builds, packages with `vpk` 1.2.161 (including a delta from the previous release) and publishes the GitHub Release. |
 | Toolchain | Velopack needs Rust 1.88+, so `rust-toolchain.toml` pins Rust 1.99.1 for this repo (Dave's default toolchain is unchanged); the release builder uses the same. |
 
@@ -296,6 +297,53 @@ Dave asked for a full test and polish pass while away ("widgets still don't magn
 Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup shortcut); on the locked screen through the driver: magnification sweep across every dock item, widget hover labels, Launchpad open, gallery, press-hold lift, drag to reorder, gallery → dock drop into the gap (saved), right-click menus in Launchpad and dock, resize in the dock, Change Location (typed, saved, forecast switched to Ottawa), Settings (Glass sliders, Widgets page), Widget shadow slider at 100% and back, Settings gear reached from the dock, light theme; an independent code review of the night's diff (its two bugs — hover flicker in the see-through headroom, and a stale weather lookup — fixed).
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
+
+### Smarter search (2026-11-16, released in 0.2.4)
+
+Dave: "if I search for a particular windows setting it doesn't appear … there is no smart context aware search". Search only knew 19 hand-picked Settings pages, matched by name. Phases 1 and 2 of the plan (closer to Spotlight / Raycast):
+
+| Try typing | You get |
+| --- | --- |
+| `night light`, `vpn`, `mouse speed`, `resolution`, `startup apps`, `proxy` | The exact Windows setting (about 1,350 Settings entries, with Windows' own synonyms: `blue light` finds Night light) |
+| `environment variables`, `device manager`, `power plan` | Classic Control Panel tasks (about 140) |
+| `12*7+3`, `15% of 80`, `sqrt(2)`, `200 + 10%` | Calculator answer; Enter copies it |
+| `5 km in miles`, `70 f to c`, `2.5 GB in MB`, `10 kg` | Unit conversion (length, mass, volume, speed, data, time, area, temperature); Enter copies |
+| `time in tokyo`, `london time`, `time` | The time there, the day, and how far ahead or behind |
+| `weather` | Current conditions from the weather widget's location |
+| `bluetooth`, `wifi`, `dark mode`, `mute`, `volume 30`, `lock`, `screenshot`, `empty trash`, `sleep`, `restart` | Commands; toggles show On/Off and stay open so you see the change; Restart, Shut Down and Sign Out need a second Enter |
+| part of a window's title (`budget`) | Switch to that open window |
+| `g rust`, `yt lofi`, `gh laminar`, `w toronto`, `maps cafe`, `ddg …`, `amazon …` | Search that site; `github.com` opens the address |
+
+How it works:
+
+| Part | Where | Notes |
+| --- | --- | --- |
+| Settings index | `laminar-sys/src/settings_index.rs` | Reads `C:\Windows\ImmersiveControlPanel\Settings\AllSystemSettings_*.xml` (what Windows' own search uses). Names and synonyms are resource references resolved with `SHLoadIndirectString` (your display language). Each Settings page's `ms-settings:` link comes from the same files (`<PolicyIds>`), so links are Windows' own, not guessed; a short fallback table covers 8 pages and the category pages. Control Panel entries launch their `<DeepLink>` (`control.exe /name …`, or the program); entries whose program or COM class is missing are skipped. Built on a background thread at start (1.8 s with COM up; 8.6 s without, so the thread initialises COM) and cached in `%LOCALAPPDATA%\Laminar\settings-index.json`, rebuilt when Windows updates the files or the language changes. |
+| Ranking | `laminar-sys/src/search.rs`, `laminar/src/launchpad_search.rs` | One list across apps, commands, windows, settings and files. Settings need a real match (name contains the words, or a synonym starts with them; no loose letter matches). Typing exactly a command's word makes it the Top Hit ("bluetooth" → the toggle, settings right below). A short `INTENTS` table fixes words where Windows' synonyms point elsewhere first ("uninstall" → Installed apps, not "Uninstall updates"). Sections are ordered by their best result; at most two rows per Settings page. |
+| Learning | `laminar-sys/src/history.rs` | Each pick is stored as (what you typed, which result). Typing the same or the start of it again lifts that result (picked VPN after `vpn` → `v` shows VPN first). Older picks count less (half after 30 days); 400 kept. Saved in `%APPDATA%\Laminar\search-history.json`; the `Clear Search History` command forgets it. |
+| Answers | `laminar-sys/src/calc.rs`, `worldtime.rs` | Calculator and converter only answer when the whole query is a calculation (a lone number or a word never is). City times use Windows' time-zone list (city names in its display names) plus ~70 aliases for regions Windows names by zone ("Eastern Time"). |
+
+Checked (agent): 93 tests pass. They include 31 real searches run against this PC's installed apps and Windows index, asserting the Top Hit for each (the table above), and a learning test ("v" → VPN after one pick). Typical search time is 1–2 ms. The first time search is used it takes about 70 ms while it reads the time zones, and those are now loaded at start-up. Release build has no warnings.
+
+An independent review of the search code found six problems, all now fixed:
+
+| Problem | Fix |
+| --- | --- |
+| Holding Enter, or double-clicking a row, could confirm Restart / Shut Down / Sign Out (auto-repeat and the second click counted as the second press) | Enter auto-repeat is ignored. A confirm has to come at least a double-click interval after arming, and only for the armed command. |
+| Sleep ran on one press, and learning could make "s" + Enter sleep the PC | Sleep asks again too, and search never learns any of these four commands. |
+| An instant answer could hide an app the query names ("google chrome" searched Google; "clock" copied the time) | An app or window whose name starts with the whole query is the Top Hit; the answer moves to second. |
+| Arming changed the row's score, so the selection could move | The row keeps its score, and the selection follows it. |
+| The clipboard could reject the copy and leak the memory | The copy now names the dock's window as the clipboard's owner, and frees the memory if it fails. |
+| "3x4" didn't calculate; "wifi" missed "Wi-Fi" names in the quick filter | Both fixed. Each setting's lower-case search text is now built once, not on every keystroke. |
+
+Checked on screen (agent, 2026-11-16, test copy with its own settings): `night light`, `bluetooth` (On pill, state only, not toggled), `12*7+3`, `google chrome`, `time in tokyo`, `5 km in miles`, `vpn` and `g rust traits` all showed the expected Top Hit or answer, the section headers, and the Enter hint. That check found two problems, both fixed and rechecked: a sum also listed unrelated files (Windows reads `*` as a wildcard), so sums no longer show files; and a command waiting for its second Enter now says "Confirm" instead of "Run".
+
+⚠️ Rule for testing: never type or arm power commands (restart, shut down, sign out, sleep) in the test copy. It runs them for real, so one stray Enter reboots the PC. Check the confirm step with unit tests only.
+
+Not checked at all:
+- That every `ms-settings:` link opens the right page. They come from Windows' own files, and opening each one would flood the screen.
+- Windows Security entries. They need the Security app's package resources, which didn't resolve, so they're absent.
+- Currency conversion. It needs exchange rates from the internet and wasn't built.
 
 ### Known gaps
 

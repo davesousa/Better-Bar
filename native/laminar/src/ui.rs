@@ -101,6 +101,11 @@ pub mod theme {
     pub fn accent() -> Color {
         rgba(10, 132, 255, 1.0)
     }
+    /// The accent as (r, g, b, a) for text and glyphs.
+    pub fn accent_f() -> (f32, f32, f32, f32) {
+        let c = accent();
+        (c.R as f32 / 255.0, c.G as f32 / 255.0, c.B as f32 / 255.0, c.A as f32 / 255.0)
+    }
     pub fn fill_2() -> Color {
         ink(0.14)
     }
