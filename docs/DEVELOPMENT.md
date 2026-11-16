@@ -308,7 +308,7 @@ Avira's behaviour check flagged the installed `laminar.exe` as `Drop.Win64.Start
 | Reinstall (setting says on, shortcut gone) | Shortcut recreated silently | Setting switches to off to match; turn it on again in Settings |
 | Existing install with the shortcut | Kept | Kept |
 
-Checked: builds, 93 tests pass, release build succeeded. ⚠️ Not yet checked with an installed copy. Avira may still flag when the switch is turned on; code signing (Azure Artifact Signing, US$9.99/month, individuals in the US or Canada) is the longer-term fix.
+Checked: builds, 93 tests pass, release build succeeded. ✅ Dave's desktop updated 0.2.5 → 0.2.6 in-app at 15:42 with no "file in use" retries (Slack started a minute later, so the apps-open case is still unproven), its existing shortcut and setting kept, and no Avira detection. ⚠️ Not yet seen: a fresh install starting with the switch off, and the reinstall case. Avira may still flag when the switch is turned on; code signing (Azure Artifact Signing, US$9.99/month, individuals in the US or Canada) is the longer-term fix.
 ### Update and panel-shadow fixes (2026-11-16, released in 0.2.5)
 
 | Problem | Cause (evidence) | Fix |
