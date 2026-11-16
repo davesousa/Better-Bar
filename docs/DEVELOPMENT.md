@@ -218,11 +218,11 @@ elease`) shows "developer build", never checks for updates and never touches the
 | Releasing | Set `version` in `native/laminar/Cargo.toml`, commit, push a matching tag (`git tag v0.1.1`, `git push origin v0.1.1`). `.github/workflows/release.yml` builds, packages with `vpk` 1.2.161 (including a delta from the previous release) and publishes the GitHub Release. |
 | Toolchain | Velopack needs Rust 1.88+, so `rust-toolchain.toml` pins Rust 1.99.1 for this repo (Dave's default toolchain is unchanged); the release builder uses the same. |
 
-Checked on this PC (2026-11-11): builds with no warnings; `vpk pack` made Setup.exe (10.8 MB), the full package and the feed; the update icon draws in a test dock; the installed-update check against GitHub runs (`cargo run --release -p laminar --example update_feed -- 0.0.1`). Not installed here because an installed copy would share the one-dock lock with Dave's running dock, and uninstalling would close it. ⚠️ Install, update and uninstall need the test on Dave's other machine. Unsigned for now, so Windows shows "Windows protected your PC" (More info → Run anyway); signing is a later decision.
+Checked on this PC (2026-11-11): builds with no warnings; `vpk pack` made Setup.exe (10.8 MB), the full package and the feed; the update icon draws in a test dock; the installed-update check against GitHub runs (`cargo run --release -p laminar --example update_feed -- 0.0.1`). Not installed here because an installed copy would share the one-dock lock with Dave's running dock, and uninstalling would close it. ✅ Install, update and uninstall need the test on Dave's other machine. *(Done 2026-11-16: the laptop installed from GitHub and updated in-app without problems.)* Unsigned for now, so Windows shows "Windows protected your PC" (More info → Run anyway); signing is a later decision.
 
 First release (2026-11-12): [v0.1.0](https://github.com/davesousa/Better-Bar/releases/tag/v0.1.0), published by the workflow on its first run. ✅ The release has Setup.exe, the full package and `releases.win.json`; the update check run as an installed 0.0.1 is offered 0.1.0, and as 0.1.0 is told it's up to date.
 
-Avira false alarm and the 0.2.2 fix (2026-11-15): Avira Security (Defender is off on Dave's PC) flagged the 0.2.0 `Setup.exe` as `Drop.Win64.RegStartupSelfCopy` at 20:46, five hours after Dave installed it and two seconds after the dock downloaded the 0.2.1 update. Its clean-up finished at 20:47:05, the same second `Update.exe` disappeared from `%LocalAppData%\LaminarDock`, which left the install on 0.2.0 with no updater. Evidence: `C:\ProgramData\Avira\Security\Logs\Elevated\Avira.Spotlight.Service_*.log` ("Malware detected event"), `%LocalAppData%elopackelopack_LaminarDock.log`. Likely cause (inference from the detection name): an unsigned app that copies itself into AppData and writes itself into `HKCU\…\Run`, which the dock also rewrote on every start. 0.2.2 uses a Startup-folder shortcut instead and only deletes the old `Run` value. ⚠️ Not proven against Avira until it sees the 0.2.2 Setup.exe; reporting false positives to Avira and signing the installer remain open decisions.
+Avira false alarm and the 0.2.2 fix (2026-11-15): Avira Security (Defender is off on Dave's PC) flagged the 0.2.0 `Setup.exe` as `Drop.Win64.RegStartupSelfCopy` at 20:46, five hours after Dave installed it and two seconds after the dock downloaded the 0.2.1 update. Its clean-up finished at 20:47:05, the same second `Update.exe` disappeared from `%LocalAppData%\LaminarDock`, which left the install on 0.2.0 with no updater. Evidence: `C:\ProgramData\Avira\Security\Logs\Elevated\Avira.Spotlight.Service_*.log` ("Malware detected event"), `%LocalAppData%elopackelopack_LaminarDock.log`. Likely cause (inference from the detection name): an unsigned app that copies itself into AppData and writes itself into `HKCU\…\Run`, which the dock also rewrote on every start. 0.2.2 uses a Startup-folder shortcut instead and only deletes the old `Run` value. *(Superseded 2026-11-16: Avira then flagged the Startup shortcut as Drop.Win64.Startup; since 0.2.6 the dock never creates it on its own, see below. Reporting false positives to Avira and signing remain open decisions.)*
 
 ### Widgets and the new Start button (2026-11-15)
 
@@ -298,6 +298,17 @@ Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
 
+### Start at sign-in only when the user turns it on (2026-11-16, released in 0.2.6)
+
+Avira's behaviour check flagged the installed `laminar.exe` as `Drop.Win64.Startup.3410` (2:46 PM, first launch after a reinstall): on launch the dock had created its own Startup shortcut, and an unsigned program adding itself to Startup on first run is what malware droppers do. The dock never creates that shortcut on its own now.
+
+| Situation | Before | Now |
+| --- | --- | --- |
+| New install | Shortcut created on first launch | Off; Settings → Behavior → "Start Laminar when you sign in" creates it |
+| Reinstall (setting says on, shortcut gone) | Shortcut recreated silently | Setting switches to off to match; turn it on again in Settings |
+| Existing install with the shortcut | Kept | Kept |
+
+Checked: builds, 93 tests pass, release build succeeded. ⚠️ Not yet checked with an installed copy. Avira may still flag when the switch is turned on; code signing (Azure Artifact Signing, US$9.99/month, individuals in the US or Canada) is the longer-term fix.
 ### Update and panel-shadow fixes (2026-11-16, released in 0.2.5)
 
 | Problem | Cause (evidence) | Fix |
