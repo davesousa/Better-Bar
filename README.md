@@ -208,19 +208,20 @@ Decision (Dave, 2026-11-11): use [Velopack](https://docs.velopack.io/) with upda
 | Part | How it works |
 | --- | --- |
 | Install | `LaminarDock-win-Setup.exe` from the GitHub Release installs per user in `%LocalAppData%\LaminarDock` (no admin), adds Start menu and desktop shortcuts, and starts Laminar. Settings stay in `%AppData%\Laminar`, so updates and reinstalls keep them. |
-| Start at sign-in | Installed copies add `HKCU\…\Run\Laminar Dock`. Setting: **Settings → About → Start Laminar when you sign in**. |
+| Start at sign-in | Installed copies add a `Laminar Dock` shortcut to the Startup folder (`shell:startup`), created only when missing and removed when the setting is off. Since 0.2.2; earlier versions used `HKCU\…\Run\Laminar Dock`, which 0.2.2 removes (see the Avira note below). Setting: **Settings → About → Start Laminar when you sign in**. |
 | Update check | Installed copies check GitHub 20 s after starting, then every 6 hours, and download a newer version quietly. Setting: **Check for updates automatically**; **Check for updates** button on About, and **Check for Updates…** in the dock's right-click menu. |
 | Update icon | A green download tile appears before the Recycle Bin. Click: **Restart and Update**, **What's New** (the release page), **Remind Me Tomorrow**, **Remind Me Next Week**, **Skip This Version**. Nothing installs until Restart and Update. |
 | Installing an update | Laminar starts Velopack's updater, quits cleanly (Windows' taskbar comes back), the updater swaps the files and starts the new version. |
-| Uninstall | Windows Settings → Apps. Laminar's uninstall step quits the running dock (restoring the taskbar) and removes the sign-in entry. |
-| Developer builds | A copy not installed by Setup.exe (like `target
-elease`) shows "developer build", never checks for updates and never touches the sign-in entry. |
+| Uninstall | Windows Settings → Apps. Laminar's uninstall step quits the running dock (restoring the taskbar) and removes the Startup shortcut. |
+| Developer builds | A copy not installed by Setup.exe (like `targetelease`) shows "developer build", never checks for updates and never touches the Startup shortcut. |
 | Releasing | Set `version` in `native/laminar/Cargo.toml`, commit, push a matching tag (`git tag v0.1.1`, `git push origin v0.1.1`). `.github/workflows/release.yml` builds, packages with `vpk` 1.2.161 (including a delta from the previous release) and publishes the GitHub Release. |
 | Toolchain | Velopack needs Rust 1.88+, so `rust-toolchain.toml` pins Rust 1.99.1 for this repo (Dave's default toolchain is unchanged); the release builder uses the same. |
 
 Checked on this PC (2026-11-11): builds with no warnings; `vpk pack` made Setup.exe (10.8 MB), the full package and the feed; the update icon draws in a test dock; the installed-update check against GitHub runs (`cargo run --release -p laminar --example update_feed -- 0.0.1`). Not installed here because an installed copy would share the one-dock lock with Dave's running dock, and uninstalling would close it. ⚠️ Install, update and uninstall need the test on Dave's other machine. Unsigned for now, so Windows shows "Windows protected your PC" (More info → Run anyway); signing is a later decision.
 
 First release (2026-11-12): [v0.1.0](https://github.com/davesousa/Better-Bar/releases/tag/v0.1.0), published by the workflow on its first run. ✅ The release has Setup.exe, the full package and `releases.win.json`; the update check run as an installed 0.0.1 is offered 0.1.0, and as 0.1.0 is told it's up to date.
+
+Avira false alarm and the 0.2.2 fix (2026-11-15): Avira Security (Defender is off on Dave's PC) flagged the 0.2.0 `Setup.exe` as `Drop.Win64.RegStartupSelfCopy` at 20:46, five hours after Dave installed it and two seconds after the dock downloaded the 0.2.1 update. Its clean-up finished at 20:47:05, the same second `Update.exe` disappeared from `%LocalAppData%\LaminarDock`, which left the install on 0.2.0 with no updater. Evidence: `C:\ProgramData\Avira\Security\Logs\Elevated\Avira.Spotlight.Service_*.log` ("Malware detected event"), `%LocalAppData%elopackelopack_LaminarDock.log`. Likely cause (inference from the detection name): an unsigned app that copies itself into AppData and writes itself into `HKCU\…\Run`, which the dock also rewrote on every start. 0.2.2 uses a Startup-folder shortcut instead and only deletes the old `Run` value. ⚠️ Not proven against Avira until it sees the 0.2.2 Setup.exe; reporting false positives to Avira and signing the installer remain open decisions.
 
 ### Widgets and the new Start button (2026-11-15)
 

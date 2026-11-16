@@ -4844,8 +4844,8 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             if crate::tray::active() {
                 SetTimer(Some(hwnd), T_TRAY_RAISE, 1500, None);
             }
-            // Installed copies: keep the sign-in entry in step with the setting, and look
-            // for updates once things have settled.
+            // Installed copies: keep the Startup shortcut in step with the setting (only
+            // created when missing), and look for updates once things have settled.
             if crate::updater::installed() {
                 crate::updater::set_start_at_login(dock.cfg.start_at_login);
                 SetTimer(Some(hwnd), T_UPDATE_CHECK, 20_000, None);
