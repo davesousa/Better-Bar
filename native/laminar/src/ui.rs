@@ -195,6 +195,34 @@ pub struct Panel {
     pub margin: f32,
     pub w: f32,
     pub h: f32,
+    shadow: SpriteVisual,
+    radius: f32,
+    scale: f32,
+    strength: f32,
+}
+
+/// The panel's drop shadow at `strength` 0..1, drawn hollow (none under the glass).
+fn panel_shadow_brush(c: &Compositor, gfx: &Gfx, radius: f32, scale: f32, strength: f32) -> Result<CompositionNineGridBrush> {
+    let blur = 22.0 * scale;
+    let (sh, insets) = gfx.hollow_shadow_surface(radius, blur, strength.clamp(0.0, 1.0), 6.0 * scale)?;
+    let sb = c.CreateSurfaceBrushWithSurface(&sh)?;
+    sb.SetStretch(CompositionStretch::Fill)?;
+    let nine = c.CreateNineGridBrush()?;
+    nine.SetSource(&sb)?;
+    nine.SetInsets(insets)?;
+    Ok(nine)
+}
+
+impl Panel {
+    /// Redraw the shadow at a new strength (Settings → Panel shadow, while dragging).
+    pub fn set_shadow(&mut self, c: &Compositor, gfx: &Gfx, strength: f32) -> Result<()> {
+        if (strength - self.strength).abs() < 0.001 {
+            return Ok(());
+        }
+        self.shadow.SetBrush(&panel_shadow_brush(c, gfx, self.radius, self.scale, strength)?)?;
+        self.strength = strength;
+        Ok(())
+    }
 }
 
 pub fn panel(
@@ -214,12 +242,8 @@ pub fn panel(
     root.SetSize(v2(w + 2.0 * margin, h + 2.0 * margin))?;
     // Shadow, slightly offset downwards.
     // `shadow` 0..1 (Settings → Glass → Panel shadow); 0.42 was the original strength.
-    let (sh, insets) = gfx.hollow_shadow_surface(radius, blur, shadow.clamp(0.0, 1.0), 6.0 * scale)?;
-    let sb = c.CreateSurfaceBrushWithSurface(&sh)?;
-    sb.SetStretch(CompositionStretch::Fill)?;
-    let nine = c.CreateNineGridBrush()?;
-    nine.SetSource(&sb)?;
-    nine.SetInsets(insets)?;
+    let strength = shadow;
+    let nine = panel_shadow_brush(c, gfx, radius, scale, strength)?;
     let shadow = c.CreateSpriteVisual()?;
     shadow.SetBrush(&nine)?;
     shadow.SetSize(v2(w + 2.0 * blur, h + 2.0 * blur))?;
@@ -242,7 +266,7 @@ pub fn panel(
     content.SetSize(v2(w, h))?;
     body.Children()?.InsertAtTop(&content)?;
     root.Children()?.InsertAtTop(&body)?;
-    Ok(Panel { root, body, content, margin, w, h })
+    Ok(Panel { root, body, content, margin, w, h, shadow, radius, scale, strength })
 }
 
 /// LAMINAR_TESTCTL (test driver): animations jump to their end. Keyframes only advance

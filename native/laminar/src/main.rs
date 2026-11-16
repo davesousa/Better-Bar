@@ -54,10 +54,22 @@ pub struct Options {
     pub parent: Option<u32>,
 }
 
+/// Work from the user's folder, not the install folder Velopack starts us in. Every app
+/// the dock opens inherits this working folder; one left pointing into
+/// `LaminarDock\current` (Slack, say) stops Velopack renaming that folder, and the update
+/// fails with "file in use" until the app quits.
+fn leave_install_folder() {
+    let home = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from).filter(|p| p.is_dir());
+    if let Some(dir) = home.or_else(|| std::env::var_os("SystemRoot").map(std::path::PathBuf::from)) {
+        let _ = std::env::set_current_dir(dir);
+    }
+}
+
 fn main() -> Result<()> {
     let started = std::time::Instant::now();
     // Velopack's install / update / uninstall steps run here and exit (see updater.rs).
     updater::startup();
+    leave_install_folder();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // `--watchdog <pid> [taskbar-state]`: tiny helper that restores the Windows taskbar

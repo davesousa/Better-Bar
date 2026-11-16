@@ -508,6 +508,11 @@ impl Launchpad {
     }
 
     pub fn render(&mut self, c: &Compositor, gfx: &Gfx, d: &Data) -> Result<()> {
+        // The panels are built when Launchpad opens; a Panel shadow change in Settings
+        // (inside Launchpad) redraws their shadows here so the slider works live.
+        for (_, p, _) in self.panels.iter_mut() {
+            let _ = p.set_shadow(c, gfx, d.cfg.panel_shadow);
+        }
         // Render every panel even if one fails, so one problem can't freeze the others.
         let a = self.render_left(c, gfx, d);
         let b = self.render_center(c, gfx, d);

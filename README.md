@@ -298,6 +298,15 @@ Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
 
+### Update and panel-shadow fixes (2026-11-16, released in 0.2.5)
+
+| Problem | Cause (evidence) | Fix |
+| --- | --- | --- |
+| In-dock update closes, "installs", and reopens on the old version (desktop only; the laptop updated fine) | Velopack backs up by renaming `LaminarDock\current`. Apps opened from the dock inherited the dock's working folder, which was that folder (Velopack starts the dock there). Windows won't rename a folder some process is "in". Velopack log: 10 s of "file in use" (os error 32), then "running processes prevented it". Seven Slack processes had `...\LaminarDock\current\` as their working folder. | The dock switches its working folder to the user folder (`%USERPROFILE%`) at startup, so nothing it opens holds the install folder. Checked: a test copy started from its own folder reports `C:\Users\davej\`. |
+| The dock kept offering 0.2.3 after 0.2.4 shipped | Once a version was downloaded, the dock stopped asking GitHub. | It always asks GitHub. An older download is used only when it's the latest, or when offline. |
+| Panel shadow slider seems to do nothing | Launchpad's panels are drawn when it opens. Settings opens inside Launchpad, so their shadows never redrew while dragging. | The panel shadows redraw whenever the setting changes. Checked on screen: dragging 0% to 100% shows the shadow appear live. |
+
+To get past an install folder that's already held (any version before this fix), quit apps opened from the dock first (Slack fully, from its tray icon), then update.
 ### Smarter search (2026-11-16, released in 0.2.4)
 
 Dave: "if I search for a particular windows setting it doesn't appear … there is no smart context aware search". Search only knew 19 hand-picked Settings pages, matched by name. Phases 1 and 2 of the plan (closer to Spotlight / Raycast):

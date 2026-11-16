@@ -105,23 +105,35 @@ pub fn check(hwnd: HWND, msg: u32) {
     std::thread::spawn(move || {
         let result = (|| -> Status {
             let Some(m) = manager() else { return Status::NotInstalled };
-            // Downloaded earlier but not installed yet: no need to ask GitHub again.
-            if let Some(asset) = m.get_update_pending_restart() {
+            // A version downloaded earlier but not installed (an install that failed, say).
+            // Always ask GitHub too, so a newer release replaces it instead of the dock
+            // offering the old one forever.
+            let pending = m.get_update_pending_restart();
+            let ready = |asset: VelopackAsset| {
                 let v = asset.Version.clone();
                 *READY.lock().unwrap() = Some(asset);
-                return Status::Ready(v);
-            }
+                Status::Ready(v)
+            };
             match m.check_for_updates() {
-                Ok(UpdateCheck::UpdateAvailable(info)) => match m.download_updates(&info, None) {
-                    Ok(()) => {
-                        let v = info.TargetFullRelease.Version.clone();
-                        *READY.lock().unwrap() = Some(info.TargetFullRelease.clone());
-                        Status::Ready(v)
+                Ok(UpdateCheck::UpdateAvailable(info)) => {
+                    let latest = info.TargetFullRelease.clone();
+                    if let Some(p) = pending.filter(|p| p.Version == latest.Version) {
+                        return ready(p);
                     }
-                    Err(e) => Status::Failed(format!("download failed: {e}")),
+                    match m.download_updates(&info, None) {
+                        Ok(()) => ready(latest),
+                        Err(e) => Status::Failed(format!("download failed: {e}")),
+                    }
+                }
+                Ok(_) => match pending {
+                    Some(p) => ready(p),
+                    None => Status::UpToDate,
                 },
-                Ok(_) => Status::UpToDate,
-                Err(e) => Status::Failed(format!("{e}")),
+                // Offline: the earlier download can still be installed.
+                Err(e) => match pending {
+                    Some(p) => ready(p),
+                    None => Status::Failed(format!("{e}")),
+                },
             }
         })();
         set_status(result);
