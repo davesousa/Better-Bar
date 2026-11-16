@@ -1,6 +1,6 @@
 [package]
 name = "laminar"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 rust-version = "1.88"
 description = "Laminar Dock: a dock and Launchpad for Windows (Rust + Windows Composition)"
