@@ -87,6 +87,16 @@ const WM_APP_UPDATE: u32 = WM_APP + 7;
 /// for example while the session is locked.
 const WM_APP_TESTCTL: u32 = WM_APP + 40;
 
+/// A window that belongs to this process (Launchpad, menus, previews, the dock itself).
+fn is_own_window(h: HWND) -> bool {
+    if h.0.is_null() {
+        return true;
+    }
+    let mut pid = 0u32;
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(h, Some(&mut pid)) };
+    pid == std::process::id()
+}
+
 /// LAMINAR_TESTCTL: pointer driven by WM_APP_TESTCTL instead of the real cursor.
 fn testctl() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1764,6 +1774,11 @@ impl Dock {
     fn on_click(&mut self, i: usize) {
         self.hide_preview();
         let it = self.items[i].clone();
+        // Opening or switching to something from the dock leaves Launchpad. (Clicking the
+        // dock doesn't take focus from Launchpad, so it wouldn't close on its own.)
+        if self.launchpad.open && matches!(it.kind, Kind::App | Kind::Trash | Kind::Stack) {
+            self.close_launchpad();
+        }
         match it.kind {
             Kind::Launch => self.toggle_launchpad(),
             Kind::Trash => apps::launch(apps::RECYCLE_BIN),
@@ -2080,7 +2095,6 @@ impl Dock {
         }
     }
 
-    /// Ask GitHub for a newer Laminar (installed copies only).
     /// Automatic update checks, at the frequency set in Settings → About (default once a
     /// day; "At startup" checks once per launch). The last check time is saved, so
     /// restarting Laminar doesn't check again. People on metered connections asked for this.
@@ -2094,7 +2108,6 @@ impl Dock {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let last = self.cfg.last_update_check;
         let due = crate::updater::check_due(self.cfg.check_updates, self.cfg.update_check_hours, last, now, first);
-
         if due {
             self.cfg.last_update_check = now;
             self.cfg.save();
@@ -2105,6 +2118,8 @@ impl Dock {
         }
     }
 
+    /// Ask GitHub for a newer Laminar (installed copies only). `manual` (the dock menu)
+    /// reports the result in a menu; otherwise it only updates the icon and Settings.
     fn check_for_update(&mut self, manual: bool) {
         if !crate::updater::installed() {
             if manual {
@@ -2158,8 +2173,43 @@ impl Dock {
             Status::Idle => if crate::updater::installed() { "Updates: not checked yet.".into() } else { "Developer build: updates are off.".into() },
             Status::Checking => "Checking for updates…".into(),
             Status::UpToDate => "Up to date.".into(),
-            Status::Ready(v) => format!("Version {v} is ready: click the update icon in the dock."),
+            Status::Ready(v) => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                if v == self.cfg.update_skip {
+                    format!("Version {v} is ready to install. You skipped it, so the dock won't remind you.")
+                } else if now < self.cfg.update_snooze_until {
+                    let days = (self.cfg.update_snooze_until - now).div_ceil(24 * 3600);
+                    format!("Version {v} is ready to install. The dock will remind you in {days} day{}.", if days == 1 { "" } else { "s" })
+                } else {
+                    format!("Version {v} is ready to install.")
+                }
+            }
             Status::Failed(e) => format!("Update check failed: {}", e.chars().take(70).collect::<String>()),
+        }
+    }
+
+    /// The update controls Settings → About shows for the current state.
+    fn update_ui_for(ready: &Option<String>) -> lp::UpdateUi<'_> {
+        use crate::updater::Status;
+        // Test driver only: LAMINAR_DEMO_UPDATE=<version>|checking|idle shows that state
+        // (test copies aren't installed, so they'd otherwise show "Developer build").
+        if testctl() {
+            static DEMO: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+            if let Some(v) = DEMO.get_or_init(|| std::env::var("LAMINAR_DEMO_UPDATE").ok()).as_deref() {
+                return match v {
+                    "checking" => lp::UpdateUi::Checking,
+                    "idle" => lp::UpdateUi::Idle,
+                    v => lp::UpdateUi::Ready(v),
+                };
+            }
+        }
+        if !crate::updater::installed() {
+            return lp::UpdateUi::Off;
+        }
+        match crate::updater::status() {
+            Status::Checking => lp::UpdateUi::Checking,
+            Status::Ready(_) => ready.as_deref().map(lp::UpdateUi::Ready).unwrap_or(lp::UpdateUi::Idle),
+            _ => lp::UpdateUi::Idle,
         }
     }
 
@@ -2855,6 +2905,7 @@ impl Dock {
         let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
+        let app_update_ver = self.app_update.clone();
         let lp_wins = self.lp_windows();
         let data = lp::Data {
             apps: &self.lp_apps,
@@ -2873,6 +2924,7 @@ impl Dock {
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
+            update_ui: Self::update_ui_for(&app_update_ver),
             hub: &self.hub,
             whatsapp: wa,
             windows: &lp_wins,
@@ -2993,6 +3045,7 @@ impl Dock {
         let tray_list: Vec<(u64, String)> = tray.iter().map(|t| (t.key, t.tip.clone())).collect();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
+        let app_update_ver = self.app_update.clone();
         let lp_wins = self.lp_windows();
         let data = lp::Data {
             apps: &self.lp_apps,
@@ -3011,6 +3064,7 @@ impl Dock {
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
+            update_ui: Self::update_ui_for(&app_update_ver),
             hub: &self.hub,
             whatsapp: wa,
             windows: &lp_wins,
@@ -3112,7 +3166,18 @@ impl Dock {
                 self.close_launchpad();
                 apps::launch(&u);
             }
-            Act::CheckUpdates => self.check_for_update(true),
+            // From Settings → About: the result shows in place there, not as a menu.
+            Act::CheckUpdates => self.check_for_update(false),
+            Act::UpdateNow => self.on_menu_command(CMD_UPDATE_NOW),
+            Act::UpdateNotes => self.on_menu_command(CMD_UPDATE_NOTES),
+            Act::UpdateSnooze(secs) => {
+                self.snooze_update(secs);
+                self.lp_render_about();
+            }
+            Act::UpdateSkip => {
+                self.on_menu_command(CMD_UPDATE_SKIP);
+                self.lp_render_about();
+            }
             Act::Web(q) => {
                 self.close_launchpad();
                 let enc: String = q
@@ -4487,6 +4552,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 if wp.0 as u32 == EVENT_SYSTEM_FOREGROUND {
                     d.fg = tracker::foreground();
+                    // Another program came to the front (from the dock, Alt+Tab, a
+                    // notification...): leave Launchpad. Its own focus-loss message isn't
+                    // enough, because Windows doesn't always give Launchpad focus to lose.
+                    if d.launchpad.open && !d.synthetic() && !testctl() && !is_own_window(d.fg) {
+                        d.close_launchpad();
+                    }
                     d.attention.remove(&(d.fg.0 as isize)); // looked at: clear its dot
                     d.update_indicators();
                 }

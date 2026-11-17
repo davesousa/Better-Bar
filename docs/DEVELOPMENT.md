@@ -298,6 +298,14 @@ Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
 
+### Updates in place in Settings, and Launchpad closing reliably (2026-11-16, released in 0.2.8)
+
+| Problem (Dave) | Fix |
+| --- | --- |
+| Settings → About → **Check for updates** opened its result as a menu wherever the pointer was | The result shows in place. While checking, the button reads **Checking…**. When a version is ready: an accent **Restart and Update** button, **What's New**, and links for Remind me tomorrow · Remind me next week · Skip this version · Check again. The status line says when a reminder or skip is set. The dock's update icon keeps its menu (it opens beside the icon). |
+| Clicking something in the dock while Launchpad was open switched apps behind it, but Launchpad stayed | Launchpad closed only when its own window lost focus, and Windows doesn't always give it focus (and clicking the dock never takes it). Now clicking an app, the Recycle Bin or a stack in the dock closes Launchpad first, and Launchpad closes whenever another program's window comes to the front (the dock's existing foreground-change hook). |
+
+Checked: builds, 94 tests pass. On screen (test copy; `LAMINAR_DEMO_UPDATE=<version>|checking|idle` fakes the update state because test copies aren't installed): the ready state's buttons and links, and the Checking… button. ⚠️ Not checked: the Launchpad closing fix (the test driver turns off focus rules), and clicking the update buttons in an installed copy. Built in a separate worktree because another session's unfinished widget-style work didn't compile in the shared checkout.
 ### Update checks: daily by default, with a frequency choice (2026-11-16, released in 0.2.7)
 
 A user on X pointed out that checking GitHub "every few hours" is unkind to metered connections. Dave replied that the default would become once a day, with a frequency option and an on/off switch.

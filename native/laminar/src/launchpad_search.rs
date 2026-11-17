@@ -720,6 +720,7 @@ mod tests {
             update: None,
             app_version: "0.0.0",
             app_update: "",
+            update_ui: crate::launchpad::UpdateUi::Off,
             windows: &[],
             history,
         };

@@ -37,6 +37,19 @@ const G_CHECK: &str = "\u{E73E}";
 /// Wi-Fi signal: 1, 2, 3 bars, full.
 const G_WIFI_BARS: [&str; 4] = ["\u{E872}", "\u{E873}", "\u{E874}", "\u{E701}"];
 
+/// The update controls in Settings → About.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UpdateUi<'a> {
+    /// A developer build: it can't update itself.
+    Off,
+    /// Nothing waiting: offer "Check for updates".
+    Idle,
+    /// A check is running.
+    Checking,
+    /// This version is downloaded and ready to install.
+    Ready(&'a str),
+}
+
 /// Something the user activated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
@@ -68,6 +81,14 @@ pub enum Act {
     OpenConfig,
     /// Check GitHub for a newer Laminar now.
     CheckUpdates,
+    /// Install the downloaded update now (restarts Laminar).
+    UpdateNow,
+    /// Open the release notes of the downloaded update.
+    UpdateNotes,
+    /// Hide the dock's update icon for this many seconds.
+    UpdateSnooze(u64),
+    /// Don't remind about the downloaded version again.
+    UpdateSkip,
     Snip,
     Lock,
     Search,
@@ -308,6 +329,8 @@ pub struct Data<'a> {
     /// Laminar's version and its update status, for Settings → About.
     pub app_version: &'a str,
     pub app_update: &'a str,
+    /// What Settings → About offers for updates (buttons and links in place).
+    pub update_ui: UpdateUi<'a>,
     /// Open windows, for "switch to" results.
     pub windows: &'a [WinRow],
     /// What the user picked in search before.
@@ -814,11 +837,47 @@ impl Launchpad {
             Self::rect(c, content, pad, y, bw, bh, 9.0 * s, theme::ink(0.14))?;
             Self::txt(c, gfx, content, "Open settings file", TextStyle { px: 12.5 * s, weight: 500, center: true, max_w: Some(bw), ..Default::default() }, pad, y + 8.0 * s)?;
             self.hit(PanelId::Center, (ox + pad, oy + y, bw, bh), Act::OpenConfig, 9.0 * s, true, false);
+            // Updates happen here, in place: the button changes with the state, and a
+            // downloaded version gets its own buttons and links (no pop-up menu).
             let ux = pad + bw + 12.0 * s;
-            Self::rect(c, content, ux, y, bw, bh, 9.0 * s, theme::ink(0.14))?;
-            Self::txt(c, gfx, content, "Check for updates", TextStyle { px: 12.5 * s, weight: 500, center: true, max_w: Some(bw), ..Default::default() }, ux, y + 8.0 * s)?;
-            self.hit(PanelId::Center, (ox + ux, oy + y, bw, bh), Act::CheckUpdates, 9.0 * s, true, false);
-            y += bh + 20.0 * s;
+            let button = |this: &mut Self, x: f32, label: &str, act: Option<Act>, primary: bool| -> Result<()> {
+                let fill = if primary { theme::accent() } else { theme::ink(0.14) };
+                Self::rect(c, content, x, y, bw, bh, 9.0 * s, fill)?;
+                let color = if primary { (1.0, 1.0, 1.0, 1.0) } else if act.is_some() { theme::text() } else { theme::text_2() };
+                Self::txt(c, gfx, content, label, TextStyle { px: 12.5 * s, weight: if primary { 600 } else { 500 }, color, center: true, max_w: Some(bw), ..Default::default() }, x, y + 8.0 * s)?;
+                if let Some(a) = act {
+                    this.hit(PanelId::Center, (ox + x, oy + y, bw, bh), a, 9.0 * s, true, false);
+                }
+                Ok(())
+            };
+            match d.update_ui {
+                UpdateUi::Off => {}
+                UpdateUi::Idle => button(self, ux, "Check for updates", Some(Act::CheckUpdates), false)?,
+                UpdateUi::Checking => button(self, ux, "Checking…", None, false)?,
+                UpdateUi::Ready(_) => {
+                    button(self, ux, "Restart and Update", Some(Act::UpdateNow), true)?;
+                    button(self, ux + bw + 12.0 * s, "What's New", Some(Act::UpdateNotes), false)?;
+                }
+            }
+            y += bh;
+            if let UpdateUi::Ready(_) = d.update_ui {
+                // Smaller choices as links under the buttons.
+                y += 14.0 * s;
+                let mut lx = pad;
+                let links = [
+                    ("Remind me tomorrow", Act::UpdateSnooze(24 * 3600)),
+                    ("Remind me next week", Act::UpdateSnooze(7 * 24 * 3600)),
+                    ("Skip this version", Act::UpdateSkip),
+                    ("Check again", Act::CheckUpdates),
+                ];
+                for (label, act) in links {
+                    let (w, h) = Self::txt(c, gfx, content, label, TextStyle { px: 12.5 * s, weight: 500, color: theme::accent_f(), ..Default::default() }, lx, y)?;
+                    self.hit(PanelId::Center, (ox + lx - 6.0 * s, oy + y - 4.0 * s, w + 12.0 * s, h + 8.0 * s), act, 6.0 * s, true, false);
+                    lx += w + 24.0 * s;
+                }
+                y += 18.0 * s;
+            }
+            y += 20.0 * s;
         }
         // Widgets: a scrolling page (switches, then settings and every connection).
         let page = if sec == 4 {

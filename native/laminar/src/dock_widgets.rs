@@ -410,6 +410,7 @@ impl Dock {
         let wa = self.whatsapp_state();
         let app_version = crate::updater::version_label();
         let app_update = self.update_status_line();
+        let app_update_ver = self.app_update.clone();
         let lp_wins = self.lp_windows();
         let data = lp::Data {
             apps: &self.lp_apps,
@@ -428,6 +429,7 @@ impl Dock {
             update: self.update.as_ref(),
             app_version: &app_version,
             app_update: &app_update,
+            update_ui: Self::update_ui_for(&app_update_ver),
             hub: &self.hub,
             whatsapp: wa,
             windows: &lp_wins,
