@@ -4986,8 +4986,10 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             None,
         )?;
         // Allow the live desktop blur, and keep the dock visible during Aero Peek.
+        // DWMWA_USE_HOSTBACKDROPBRUSH is Windows 11 only: on Windows 10 it fails and the
+        // dock just loses the blur, so never let it stop startup.
         let on: i32 = 1;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as _, 4)?;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as _, 4);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_EXCLUDED_FROM_PEEK, &on as *const _ as _, 4);
         // Start fully clipped so nothing is clickable until the dock is built.
         SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);

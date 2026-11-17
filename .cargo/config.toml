@@ -1,0 +1,8 @@
+# Link the Visual C++ runtime into laminar.exe instead of needing VCRUNTIME140.dll.
+# That DLL comes from the separate "Visual C++ Redistributable", which clean Windows 10
+# machines often don't have; without it the exe can't start at all.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

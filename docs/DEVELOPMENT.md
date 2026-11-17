@@ -298,6 +298,17 @@ Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
 
+### Windows 10 start-up fixes (2026-11-17, for 0.2.9)
+
+A user on X reported that Laminar "won't work on Win10". We have no Windows 10 machine, so the agent checked the release exe's imports and the start-up path for Windows 11-only pieces.
+
+| Problem | What a Windows 10 user would see | Fix |
+| --- | --- | --- |
+| The dock window turned on `DWMWA_USE_HOSTBACKDROPBRUSH` with `?`. Microsoft documents that setting as Windows 11 (build 22000) only, so on Windows 10 the error ended start-up. | Nothing: the release build has no console, so it starts and quietly exits. | `dock.rs` ignores that error, as `ui.rs` already did for popups. Windows 10 loses the blur behind the dock rather than the dock. |
+| `laminar.exe` needed `VCRUNTIME140.dll`, which comes from the separate Visual C++ Redistributable, not from Windows. | "VCRUNTIME140.dll was not found" on machines without the Redistributable. | `.cargo/config.toml` links the C runtime into the exe (`+crt-static`). About 0.7 MB larger (measured on a `widget-polish` build: 4.3 → 5.0 MB; the 0.2.9 exe is 4.5 MB). |
+
+Checked (agent, this PC): every other function the exe imports exists on Windows 10 (import table read with a small script); the rebuilt exe imports only DLLs that ship with Windows; it runs (widget sheet rendered); release build with no warnings, `--locked` build passes, 97 tests pass. ⚠️ Not checked: running on Windows 10 itself, and how the glass looks there (Windows 10 handles the host backdrop differently, so it may look flat). We don't yet know which of the two problems the reporter hit.
+
 ### Updates in place in Settings, and Launchpad closing reliably (2026-11-16, released in 0.2.8)
 
 | Problem (Dave) | Fix |
