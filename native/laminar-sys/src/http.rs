@@ -57,7 +57,7 @@ pub fn request(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&
         }
     }
     let (host, port, path) = split_url(url).ok_or_else(|| format!("bad url: {url}"))?;
-    let agent = wide("LaminarDock/0.2 (+https://github.com/davesousa/Better-Bar)");
+    let agent = wide("LaminarDock/0.2 (+https://github.com/davesousa/Laminar_Dock)");
     let whost = wide(&host);
     let wpath = wide(&path);
     let verb = wide(method);

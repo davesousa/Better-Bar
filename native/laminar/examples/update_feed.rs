@@ -10,7 +10,7 @@ use velopack::locator::VelopackLocatorConfig;
 use velopack::sources::GithubSource;
 use velopack::{UpdateCheck, UpdateManager};
 
-const REPO: &str = "https://github.com/davesousa/Better-Bar";
+const REPO: &str = "https://github.com/davesousa/Laminar_Dock";
 
 fn main() {
     let pretend = std::env::args().nth(1).unwrap_or_else(|| "0.0.1".into());

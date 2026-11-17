@@ -4,8 +4,8 @@
 
 <br>
 
-[![Latest release](https://img.shields.io/github/v/release/davesousa/Better-Bar?label=beta&color=7c3aed&style=for-the-badge)](https://github.com/davesousa/Better-Bar/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/davesousa/Better-Bar/total?color=2563eb&style=for-the-badge)](https://github.com/davesousa/Better-Bar/releases)
+[![Latest release](https://img.shields.io/github/v/release/davesousa/Laminar_Dock?label=beta&color=7c3aed&style=for-the-badge)](https://github.com/davesousa/Laminar_Dock/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/davesousa/Laminar_Dock/total?color=2563eb&style=for-the-badge)](https://github.com/davesousa/Laminar_Dock/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-16a34a?style=for-the-badge)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-e05d24?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078d4?style=for-the-badge&logo=windows11&logoColor=white)](#-install)
@@ -13,8 +13,8 @@
 **A dock and Launchpad that replace the Windows taskbar.**<br>
 The polish of a Mac dock, the habits of Windows, and the footprint of a tiny native app.
 
-[**⬇ Download for Windows**](https://github.com/davesousa/Better-Bar/releases/latest/download/LaminarDock-win-Setup.exe) &nbsp;·&nbsp;
-[Report a bug](https://github.com/davesousa/Better-Bar/issues/new) &nbsp;·&nbsp;
+[**⬇ Download for Windows**](https://github.com/davesousa/Laminar_Dock/releases/latest/download/LaminarDock-win-Setup.exe) &nbsp;·&nbsp;
+[Report a bug](https://github.com/davesousa/Laminar_Dock/issues/new) &nbsp;·&nbsp;
 [Contribute](#-contributing) &nbsp;·&nbsp;
 [Dev log](docs/DEVELOPMENT.md)
 
@@ -30,7 +30,7 @@ The polish of a Mac dock, the habits of Windows, and the footprint of a tiny nat
 <br>
 
 > [!IMPORTANT]
-> **Laminar is in beta.** It's the daily taskbar on its author's PCs, but it has bugs and rough edges, and it has only been tested on a few machines. That's where you come in: [**tell us what breaks**](https://github.com/davesousa/Better-Bar/issues/new), and if you can fix it, [**send a pull request**](#-contributing). Every report makes the next release better.
+> **Laminar is in beta.** It's the daily taskbar on its author's PCs, but it has bugs and rough edges, and it has only been tested on a few machines. That's where you come in: [**tell us what breaks**](https://github.com/davesousa/Laminar_Dock/issues/new), and if you can fix it, [**send a pull request**](#-contributing). Every report makes the next release better.
 
 ## ⚡ Light enough to forget it's running
 
@@ -133,7 +133,7 @@ Laminar follows Windows' light/dark mode as it changes. Icon size, magnification
 
 ## 📦 Install
 
-1. Download **[LaminarDock-win-Setup.exe](https://github.com/davesousa/Better-Bar/releases/latest/download/LaminarDock-win-Setup.exe)** (about 12 MB).
+1. Download **[LaminarDock-win-Setup.exe](https://github.com/davesousa/Laminar_Dock/releases/latest/download/LaminarDock-win-Setup.exe)** (about 12 MB).
 2. Run it. It installs for your user only (no admin needed), starts Laminar, and hides the Windows taskbar.
 3. Press the **Windows key** to open Launchpad, or right-click the dock for settings.
 
@@ -157,7 +157,7 @@ This is a young project, so please expect bugs. These are the known gaps today:
 | Polish | Some widget layouts truncate text or leave empty space. Some running-app labels show the program file name (`slack.exe`) instead of the app name. |
 | Not possible (yet) | Glass refraction over live windows (Windows' compositor refuses it), and Focus / Do Not Disturb (no public Windows API). |
 
-**Found something?** [Open an issue](https://github.com/davesousa/Better-Bar/issues/new) and include:
+**Found something?** [Open an issue](https://github.com/davesousa/Laminar_Dock/issues/new) and include:
 
 - your Windows version (`winver`), and your display setup (how many monitors, and their scaling),
 - what you did, what you expected, and what happened instead (a screenshot or a short screen recording helps a lot),
@@ -169,7 +169,7 @@ Pull requests are very welcome, from typo fixes to whole features. Good places t
 
 - **Try a connector with your own account** (Stripe, Vercel, Plausible, YouTube and so on) and tell us whether it works, or fix it.
 - **Test on hardware we don't have**: Windows 10, ARM, high-DPI laptops, three or more monitors.
-- **Pick a bug** from [Issues](https://github.com/davesousa/Better-Bar/issues) or from the beta table above.
+- **Pick a bug** from [Issues](https://github.com/davesousa/Laminar_Dock/issues) or from the beta table above.
 - **Design a widget.** Each one is a small Direct2D drawing in [`native/laminar/src/widgets/`](native/laminar/src/widgets/).
 
 ### Build from source
@@ -177,8 +177,8 @@ Pull requests are very welcome, from typo fixes to whole features. Good places t
 You need Windows and [Rust](https://rustup.rs/). The exact toolchain is pinned in `rust-toolchain.toml`, and `rustup` installs it on the first build.
 
 ```bash
-git clone https://github.com/davesousa/Better-Bar.git
-cd Better-Bar
+git clone https://github.com/davesousa/Laminar_Dock.git
+cd Laminar_Dock
 cargo build --release -p laminar
 cargo test
 ```

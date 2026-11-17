@@ -24,7 +24,7 @@ use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
 
 /// Where releases are published.
-pub const REPO: &str = "https://github.com/davesousa/Better-Bar";
+pub const REPO: &str = "https://github.com/davesousa/Laminar_Dock";
 
 const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_NAME: windows::core::PCWSTR = w!("Laminar Dock");
